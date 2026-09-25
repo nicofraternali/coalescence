@@ -28,3 +28,7 @@ Thumbs.db
 # Logs and temp files
 *.log
 *.tmp
+
+# Renders guardados fuera de output/ y trazas derivadas
+projects/*/*.png
+projects/killer-sudoku-v1/traces/
