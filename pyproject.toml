@@ -8,10 +8,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "py5>=0.10",
+    "py5>=0.10.11a0",
     "numpy>=1.26",
     "scipy>=1.12",
     "pillow>=10.0",
+    "pyyaml>=6.0",
 ]
 
 [dependency-groups]
@@ -19,8 +20,14 @@ dev = [
     "jupyter>=1.0",
     "ipykernel>=6.29",
     "nbstripout>=0.7",
+    "pytest>=8.0",
 ]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+# killer_sudoku keeps its solver package next to its scripts, not in src/.
+pythonpath = ["projects/killer_sudoku"]
+testpaths = ["projects/killer_sudoku/tests"]

@@ -1,8 +1,7 @@
 """
-renderer_v1_static.py — Static final-frame renderer for a killer sudoku
-solver trace.
+Killer sudoku — static renderer for a solver trace.
 
-Reads a trace JSON file (produced by the solver) and renders the
+Reads a trace JSON file (produced by solve.py) and renders the
 complete dependency graph as a single high-resolution image:
 
   - One node per CellResolved event, positioned at the cell's grid
@@ -15,18 +14,22 @@ complete dependency graph as a single high-resolution image:
     participated causally in any event. Density of overlap encodes
     structural importance.
 
-Two node-coloring modes (toggle via COLOR_MODE at top of file, or 'm'):
-  COLOR_MODE = "inference"
+Two node-coloring modes (--color-mode, or 'm'):
+  "inference"
     Nodes colored by which rule produced them.
-  COLOR_MODE = "step"
+  "step"
     Nodes colored by their position in the temporal sequence,
     cool (early) to warm (late).
 
 Usage:
-  Edit TRACE_PATH below to point at the trace file, then run with:
-    uv run python renderer_v1_static.py
-  Press 's' to save a hi-res PNG (filename includes current step).
-  Press 'm' to toggle COLOR_MODE between "inference" and "step".
+  First solve the puzzle to produce its trace, then render it:
+    uv run python projects/killer_sudoku/solve.py --puzzle 001_hard
+    uv run python projects/killer_sudoku/sketch.py --puzzle 001_hard
+    uv run python projects/killer_sudoku/sketch.py --puzzle 001_hard --step 30 --color-mode inference --save-and-exit
+
+Interactive keys:
+  Press 's' to save a hi-res PNG with metadata (via save_artwork).
+  Press 'm' to toggle the color mode between "inference" and "step".
   Press 'o' to toggle structural overlays (cell-background tints) on/off.
   Press 'c' to toggle cage outlines and sums on/off.
   Press 'r' to re-load the trace and re-render.
@@ -38,19 +41,29 @@ Usage:
     End              jump to final state (full solve)
 """
 
+import argparse
 import json
+import sys
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime
 
 import py5
+
+from coalescence.io import save_artwork
 
 
 # ----------------------------------------------------------------------------
 # Configuration
 # ----------------------------------------------------------------------------
 
-TRACE_PATH = "traces/001_hard.json"
+PROJECT_NAME = "killer_sudoku"
+PROJECT_DIR = Path(__file__).resolve().parent
+TRACES_DIR = PROJECT_DIR / "traces"
+DEFAULT_PUZZLE = "001_hard"
+
+# Set from --puzzle in the entry point.
+puzzle_name = DEFAULT_PUZZLE
+auto_save_and_exit = False
 
 HI_RES_SIZE = 2400
 PREVIEW_SIZE = 800
@@ -144,6 +157,10 @@ full_solve_length = 0   # total events in the underlying solve; used for color s
 pg = None
 
 
+def _trace_path():
+    return TRACES_DIR / f"{puzzle_name}.json"
+
+
 def load_trace():
     """Read the trace from disk and cache the raw events plus all
     static puzzle metadata. Called once at startup. After this, changing
@@ -152,7 +169,7 @@ def load_trace():
     global trace_data, puzzle, full_solve_length
     global raw_events, _puzzle_loaded
 
-    with open(TRACE_PATH, "r", encoding="utf-8") as f:
+    with open(_trace_path(), "r", encoding="utf-8") as f:
         trace_data = json.load(f)
 
     puzzle = trace_data["puzzle"]
@@ -173,7 +190,8 @@ def load_trace():
     for g in puzzle.get("givens", []):
         givens_set.add(tuple(g["cell"]))
 
-    print(f"Loaded trace: {TRACE_PATH}")
+    print(f"Loaded trace: {_trace_path()}")
+    print(f"  Solver commit: {trace_data.get('git_commit', 'unknown')}")
     print(f"  Puzzle: {puzzle.get('puzzle_id')}")
     print(f"  Total events in solve: {full_solve_length}")
     print(f"  Givens: {len(givens_set)}")
@@ -256,7 +274,7 @@ def setup():
     py5.size(PREVIEW_SIZE, PREVIEW_SIZE, py5.P2D)
     pg = py5.create_graphics(HI_RES_SIZE, HI_RES_SIZE, py5.P2D)
     load_trace()
-    render()
+    _set_max_step(MAX_STEP)   # clamps a CLI --step to the solve length and renders
 
 
 def render():
@@ -526,6 +544,27 @@ def _draw_nodes(s):
 
 def draw():
     py5.image(pg, 0, 0, py5.width, py5.height)
+    if auto_save_and_exit and py5.frame_count == 1:
+        save_current()
+        py5.exit_sketch()
+
+
+def save_current():
+    step_tag = "final" if MAX_STEP is None else f"step{MAX_STEP:03d}"
+    params = {
+        "puzzle": puzzle_name,
+        "puzzle_id": puzzle.get("puzzle_id") if puzzle else None,
+        "trace_git_commit": trace_data.get("git_commit") if trace_data else None,
+        "max_step": MAX_STEP,
+        "color_mode": COLOR_MODE,
+        "show_overlays": SHOW_OVERLAYS,
+        "show_cages": SHOW_CAGES,
+        "hi_res_size": HI_RES_SIZE,
+        "margin_ratio": MARGIN_RATIO,
+    }
+    path = save_artwork(pg, PROJECT_NAME, params=params,
+                        label=puzzle_name, suffix=f"{COLOR_MODE}_{step_tag}")
+    print(f"Saved: {path}")
 
 
 def _set_max_step(new_value):
@@ -547,12 +586,7 @@ def key_pressed():
 
     # Save / mode toggles
     if py5.key == "s":
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        pid = puzzle.get("puzzle_id", "trace") if puzzle else "trace"
-        step_tag = "final" if MAX_STEP is None else f"step{MAX_STEP:03d}"
-        filename = f"depgraph_{pid}_{COLOR_MODE}_{step_tag}_{timestamp}.png"
-        pg.save(filename)
-        print(f"Saved: {filename}")
+        save_current()
     elif py5.key == "r":
         load_trace()
         render()
@@ -600,4 +634,39 @@ def key_pressed():
             _set_max_step(None)
 
 
-py5.run_sketch()
+# ----------------------------------------------------------------------------
+# CLI and entry point
+# ----------------------------------------------------------------------------
+
+def parse_args():
+    available = sorted(p.stem for p in TRACES_DIR.glob("*.json"))
+    parser = argparse.ArgumentParser(description="Killer sudoku trace renderer.")
+    parser.add_argument("--puzzle", type=str, default=DEFAULT_PUZZLE,
+                        help=f"Puzzle name; reads traces/<name>.json. Default: {DEFAULT_PUZZLE}. "
+                             f"Available traces: {', '.join(available) or 'none'}.")
+    parser.add_argument("--step", type=int, default=None,
+                        help="Render only events up to this step. Default: final state.")
+    parser.add_argument("--color-mode", type=str, default=COLOR_MODE,
+                        choices=["step", "inference"],
+                        help=f"Node coloring. Default: {COLOR_MODE}.")
+    parser.add_argument("--overlays", action=argparse.BooleanOptionalAction,
+                        default=SHOW_OVERLAYS, help="Structural overlay tints.")
+    parser.add_argument("--cages", action=argparse.BooleanOptionalAction,
+                        default=SHOW_CAGES, help="Cage outlines and sums.")
+    parser.add_argument("--save-and-exit", action="store_true",
+                        help="Render once, save, and exit.")
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    puzzle_name = args.puzzle
+    if not _trace_path().exists():
+        sys.exit(f"No trace at {_trace_path()}.\n"
+                 f"Run first: uv run python projects/killer_sudoku/solve.py --puzzle {puzzle_name}")
+    MAX_STEP = args.step
+    COLOR_MODE = args.color_mode
+    SHOW_OVERLAYS = args.overlays
+    SHOW_CAGES = args.cages
+    auto_save_and_exit = args.save_and_exit
+    py5.run_sketch()

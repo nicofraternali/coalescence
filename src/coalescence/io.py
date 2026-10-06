@@ -107,6 +107,19 @@ def _git_is_dirty(repo_root: Path) -> bool:
         return False
 
 
+def git_provenance() -> dict[str, Any]:
+    """Return the repo's current commit hash and dirty flag.
+
+    For files other than PNGs that should record which code produced
+    them (e.g., killer_sudoku traces).
+    """
+    repo_root = _find_repo_root(Path(__file__))
+    return {
+        "git_commit": _git_commit_hash(repo_root),
+        "git_dirty": _git_is_dirty(repo_root),
+    }
+
+
 def _library_versions() -> dict[str, str]:
     """Return versions of libraries that affect rendering output."""
     versions: dict[str, str] = {"python": platform.python_version()}
@@ -126,10 +139,11 @@ def _library_versions() -> dict[str, str]:
 def save_artwork(
     pg: Any,
     project_name: str,
-    seed: int,
-    theme_name: str,
+    seed: int | None = None,
+    theme_name: str | None = None,
     params: dict[str, Any] | None = None,
     suffix: str | None = None,
+    label: str | None = None,
 ) -> Path:
     """
     Save a py5 graphics buffer to the project's output folder with metadata.
@@ -140,10 +154,12 @@ def save_artwork(
         The off-screen buffer holding the finished artwork.
     project_name : str
         Name of the project (e.g., "pendulum"). Determines the output folder.
-    seed : int
+    seed : int, optional
         The seed used for this composition. Recorded in metadata.
-    theme_name : str
+        Omit for input-driven projects with no randomness (killer_sudoku).
+    theme_name : str, optional
         Name of the color theme (e.g., "JAPAN"). Recorded in metadata.
+        Omit for projects with a single fixed style.
     params : dict, optional
         Project-specific parameters (masses, radii, grid size, etc.).
         Will be JSON-serialized, so values must be JSON-compatible
@@ -151,6 +167,10 @@ def save_artwork(
     suffix : str, optional
         Extra string appended to the filename before the extension.
         Useful for distinguishing variants (e.g., "trace" vs "art").
+    label : str, optional
+        Identifier placed where the seed goes in the filename, for
+        projects without a seed (e.g., the puzzle name "001_hard").
+        Ignored when `seed` is given.
 
     Returns
     -------
@@ -166,9 +186,14 @@ def save_artwork(
     repo_root = _find_repo_root(Path(__file__))
     output_dir = _project_output_dir(project_name, repo_root)
 
-    # Build a filename: <project>_<seed>_<timestamp>[_<suffix>].png
+    # Build a filename: <project>_<seed or label>_<timestamp>[_<suffix>].png
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    parts = [project_name, str(seed), timestamp]
+    parts = [project_name]
+    if seed is not None:
+        parts.append(str(seed))
+    elif label:
+        parts.append(label)
+    parts.append(timestamp)
     if suffix:
         parts.append(suffix)
     base_name = "_".join(parts)
@@ -198,8 +223,10 @@ def save_artwork(
         png_info = PngImagePlugin.PngInfo()
         # PNG text chunks must be strings.
         png_info.add_text(f"{METADATA_PREFIX}project", project_name)
-        png_info.add_text(f"{METADATA_PREFIX}seed", str(seed))
-        png_info.add_text(f"{METADATA_PREFIX}theme", theme_name)
+        if seed is not None:
+            png_info.add_text(f"{METADATA_PREFIX}seed", str(seed))
+        if theme_name is not None:
+            png_info.add_text(f"{METADATA_PREFIX}theme", theme_name)
         png_info.add_text(f"{METADATA_PREFIX}timestamp_utc", metadata["timestamp_utc"])
         png_info.add_text(f"{METADATA_PREFIX}git_commit", metadata["git_commit"])
         png_info.add_text(f"{METADATA_PREFIX}metadata_json", json.dumps(metadata))

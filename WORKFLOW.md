@@ -197,8 +197,26 @@ generative AI, and the repo also holds input-driven work like killer-sudoku.
   updated to the new name; commits before the rename still use `genart`.
 - PNG metadata keys: new saves write `coalescence:*`. `read_artwork_metadata`
   still reads pieces saved with the legacy `genart:*` keys.
-- `projects/killer-sudoku-v1/` (and its `genart_killer` package) is not yet
-  renamed; its integration into the shared environment is pending.
+- `projects/killer-sudoku-v1/` (and its `genart_killer` package) was renamed
+  and integrated later; see the next section.
+
+## killer_sudoku joins the shared environment (October 2026)
+
+One environment and one `uv.lock` for every project.
+
+- `projects/killer-sudoku-v1/` → `projects/killer_sudoku/`; package
+  `genart_killer` → `killer_solver`, kept local to the project. Its own
+  `pyproject.toml`, `uv.lock`, `.venv` and placeholder `main.py` are gone.
+- Root dependencies: py5 `>=0.10.11a0` (all projects re-rendered on it),
+  `pyyaml` added; `pytest` added to the dev group. `uv run pytest` runs the
+  killer tests (converted from print scripts to real assertions).
+- Two-stage pipeline: `solve.py` writes `traces/<puzzle>.json` (with the
+  solver's git commit); `sketch.py` (formerly `renderer_v1_static.py`) renders
+  it, with a CLI matching the other sketches and saves via `save_artwork`.
+- `save_artwork`: `seed` and `theme_name` are now optional, and a `label`
+  takes the seed's place in the filename
+  (`killer_sudoku_001_hard_<date>_<time>_<mode>_<step>.png`). New
+  `git_provenance()` helper for non-PNG outputs.
 
 ## Stage 5 — Blog bridge (planned)
 

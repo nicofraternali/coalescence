@@ -31,4 +31,7 @@ Thumbs.db
 
 # Renders guardados fuera de output/ y trazas derivadas
 projects/*/*.png
-projects/killer-sudoku-v1/traces/
+projects/killer_sudoku/traces/
+
+# Local learning notes (VibeWise)
+.vibe-wise/

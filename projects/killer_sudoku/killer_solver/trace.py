@@ -180,6 +180,8 @@ class Trace:
     puzzle_data: dict[str, Any]   # the original puzzle as a dict (for self-containment)
     seed: int = 0                  # for renderer-side stochastic choices
     version: str = "1.0"           # trace schema version
+    git_commit: str | None = None  # solver code that produced the trace (set by solve.py)
+    git_dirty: bool | None = None
     events: list[Event] = field(default_factory=list)
 
     _step_counter: int = field(default=0, init=False, repr=False)
@@ -206,6 +208,8 @@ class Trace:
             "version": self.version,
             "puzzle_id": self.puzzle_id,
             "seed": self.seed,
+            "git_commit": self.git_commit,
+            "git_dirty": self.git_dirty,
             "puzzle": self.puzzle_data,
             "events": [_event_to_dict(e) for e in self.events],
         }
