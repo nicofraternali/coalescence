@@ -1,6 +1,6 @@
 # Workflow
 
-This document describes the day-to-day operations of the `generative-art` project.
+This document describes the day-to-day operations of the `coalescence` project.
 It grows as new stages are implemented. Each section is dated so you can see when
 the workflow changed.
 
@@ -11,9 +11,9 @@ the workflow changed.
 ### What exists now
 
 - `pyproject.toml` declares dependencies; `uv.lock` pins exact versions.
-- `src/genart/palettes.py` is the single source of truth for color themes.
+- `src/coalescence/palettes.py` is the single source of truth for color themes.
 - `.gitignore` excludes virtual envs, caches, and per-project `output/` folders.
-- The `genart` package is importable from any sketch via `from genart.palettes import ...`.
+- The `coalescence` package is importable from any sketch via `from coalescence.palettes import ...`.
 
 ### Daily commands
 
@@ -40,14 +40,14 @@ uv run python
 **Verify the shared package is importable:**
 
 ```powershell
-uv run python -c "from genart.palettes import TILING_THEMES; print(len(TILING_THEMES))"
+uv run python -c "from coalescence.palettes import TILING_THEMES; print(len(TILING_THEMES))"
 ```
 
 ### What does NOT yet exist
 
-- No sketches have been migrated to use `genart.palettes` yet.
-- No save/IO utilities (`genart.io`) — sketches still save manually.
-- No seed-management utility (`genart.seeds`) — pendulum still doesn't seed RNG.
+- No sketches have been migrated to use `coalescence.palettes` yet.
+- No save/IO utilities (`coalescence.io`) — sketches still save manually.
+- No seed-management utility (`coalescence.seeds`) — pendulum still doesn't seed RNG.
 - No `curated/` workflow or scripts.
 - No blog integration.
 
@@ -59,9 +59,9 @@ These come in subsequent stages.
 
 ### What was added
 
-- `src/genart/seeds.py` — `init_seed(seed=None)` deterministically seeds
+- `src/coalescence/seeds.py` — `init_seed(seed=None)` deterministically seeds
   both Python's `random` and `numpy.random`. Returns the seed used.
-- `src/genart/io.py` — `save_artwork(pg, project_name, seed, theme_name, params)`
+- `src/coalescence/io.py` — `save_artwork(pg, project_name, seed, theme_name, params)`
   saves a py5 graphics buffer with metadata embedded as PNG text chunks
   AND written to a JSON sidecar.
 
@@ -70,9 +70,9 @@ These come in subsequent stages.
 Every sketch follows this pattern:
 
 ```python
-from genart.seeds import init_seed
-from genart.io import save_artwork
-from genart.palettes import TILING_THEMES
+from coalescence.seeds import init_seed
+from coalescence.io import save_artwork
+from coalescence.palettes import TILING_THEMES
 
 def reset():
     global seed, theme_name, palette
@@ -114,7 +114,7 @@ The PNG has metadata embedded as text chunks. The JSON sidecar contains:
 ### Reading metadata back
 
 ```powershell
-uv run python -c "from genart.io import read_artwork_metadata; import json; print(json.dumps(read_artwork_metadata('path/to/piece.png'), indent=2))"
+uv run python -c "from coalescence.io import read_artwork_metadata; import json; print(json.dumps(read_artwork_metadata('path/to/piece.png'), indent=2))"
 ```
 
 ## Stage 3 — First sketch migrated (May 2026)
@@ -122,8 +122,8 @@ uv run python -c "from genart.io import read_artwork_metadata; import json; prin
 ### What was added
 
 - `projects/tiling_squares/sketch.py` — the original tiling sketch refactored
-  to use the shared package. Imports themes from `genart.palettes`, seeds
-  RNG via `genart.seeds.init_seed`, and saves via `genart.io.save_artwork`.
+  to use the shared package. Imports themes from `coalescence.palettes`, seeds
+  RNG via `coalescence.seeds.init_seed`, and saves via `coalescence.io.save_artwork`.
 - Command-line interface: `--seed`, `--theme`, `--L`.
 - Per-project README at `projects/tiling_squares/README.md`.
 
@@ -158,7 +158,7 @@ Pieces only enter version control when explicitly curated (stage 5).
 
 ### What was added
 
-- `src/genart/tiling.py` — shared primitives for Truchet-style tilings:
+- `src/coalescence/tiling.py` — shared primitives for Truchet-style tilings:
   `generate_grid(L)`, `find_diamonds(grid)`, `GridGeometry` dataclass.
 - `projects/tiling_squares/sketch.py` — refactored to use the shared module.
 - `projects/tiling_holes/sketch.py` — new sketch using the shared module
@@ -168,8 +168,8 @@ Pieces only enter version control when explicitly curated (stage 5).
 
 Both tiling sketches share their combinatorial substrate (the 0/1 grid
 and the 1001 diamond detection) but differ in rendering. The shared
-substrate lives in `genart.tiling`; rendering stays per-sketch. This
-keeps `genart.tiling` py5-free and lets each sketch express its style
+substrate lives in `coalescence.tiling`; rendering stays per-sketch. This
+keeps `coalescence.tiling` py5-free and lets each sketch express its style
 without negotiating a common rendering interface.
 
 ### Pending in Stage 4 — completed (May 2026)
@@ -182,6 +182,23 @@ without negotiating a common rendering interface.
 - New CLI flag `--max-points` for varying trace duration.
 
 Stage 4 complete. Next: Stage 5 — curation and blog bridge.
+
+## Rename — generative-art becomes coalescence (October 2026)
+
+The repository, its title, and the shared package were renamed to
+`coalescence`: the coming together of math, logic, engineering, and
+aesthetics into one practice. "Generative art" now carries connotations of
+generative AI, and the repo also holds input-driven work like killer-sudoku.
+
+- GitHub: `nicofraternali/generative-art` → `nicofraternali/coalescence`
+  (GitHub redirects the old URL).
+- Package: `src/genart/` → `src/coalescence/`; imports are now
+  `from coalescence.<module> import ...`. Older sections of this file were
+  updated to the new name; commits before the rename still use `genart`.
+- PNG metadata keys: new saves write `coalescence:*`. `read_artwork_metadata`
+  still reads pieces saved with the legacy `genart:*` keys.
+- `projects/killer-sudoku-v1/` (and its `genart_killer` package) is not yet
+  renamed; its integration into the shared environment is pending.
 
 ## Stage 5 — Blog bridge (planned)
 

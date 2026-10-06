@@ -27,6 +27,6 @@ uv run python projects/tiling_squares/sketch.py --seed 4823 --theme JAPAN
 
 - `--L` — grid resolution exponent. Default 4 (16x16 grid). Higher values
   produce finer detail at the same canvas size.
-- `--theme` — color theme. See `genart.palettes.TILING_THEMES`.
+- `--theme` — color theme. See `coalescence.palettes.TILING_THEMES`.
 - `--seed` — seed for deterministic reproduction. If given, the sketch
   renders, saves once, and exits (no interactive window).

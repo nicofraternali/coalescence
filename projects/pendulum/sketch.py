@@ -40,9 +40,9 @@ import numpy as np
 import py5
 from scipy.ndimage import label as ndi_label
 
-from genart.io import save_artwork
-from genart.palettes import PENDULUM_THEMES, list_pendulum_themes
-from genart.seeds import init_seed
+from coalescence.io import save_artwork
+from coalescence.palettes import PENDULUM_THEMES, list_pendulum_themes
+from coalescence.seeds import init_seed
 
 
 # ---------------------------------------------------------------------------

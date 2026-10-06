@@ -1,15 +1,15 @@
-# generative-art
+# coalescence
 
 A monorepo for generative art experiments by [Nico Fraternali](https://github.com/nicofraternali).
-Each project is a self-contained py5 sketch; shared utilities live in the `genart` package.
+Each project is a self-contained py5 sketch; shared utilities live in the `coalescence` package.
 
 ## Repository structure
 
 ```
-generative-art/
+coalescence/
 ├── pyproject.toml          # uv-managed dependencies
 ├── uv.lock                 # pinned exact versions, committed
-├── src/genart/             # shared importable package
+├── src/coalescence/        # shared importable package
 │   └── palettes.py         # unified color themes
 ├── projects/               # individual sketches (one folder each)
 ├── curated/                # hand-picked outputs + metadata sidecars (committed)
@@ -38,8 +38,8 @@ uv run python projects/<project-name>/sketch.py --seed <seed-from-sidecar>
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
 
 ```powershell
-git clone https://github.com/nicofraternali/generative-art.git
-cd generative-art
+git clone https://github.com/nicofraternali/coalescence.git
+cd coalescence
 uv sync --all-groups
 ```
 

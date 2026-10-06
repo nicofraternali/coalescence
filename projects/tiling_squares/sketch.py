@@ -22,10 +22,10 @@ import random
 
 import py5
 
-from genart.io import save_artwork
-from genart.palettes import TILING_THEMES, list_tiling_themes
-from genart.seeds import init_seed
-from genart.tiling import GridGeometry, find_diamonds, generate_grid
+from coalescence.io import save_artwork
+from coalescence.palettes import TILING_THEMES, list_tiling_themes
+from coalescence.seeds import init_seed
+from coalescence.tiling import GridGeometry, find_diamonds, generate_grid
 
 
 # ---------------------------------------------------------------------------

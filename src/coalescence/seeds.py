@@ -12,7 +12,7 @@ else) calls `init_seed(<seed-from-sidecar>)` before running the sketch.
 
 Usage:
 
-    from genart.seeds import init_seed
+    from coalescence.seeds import init_seed
 
     seed = init_seed()              # generates a fresh seed
     seed = init_seed(4823)          # uses the given seed

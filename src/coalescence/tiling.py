@@ -14,7 +14,7 @@ draws thicker wires that interrupt at trench centers.
 
 Usage:
 
-    from genart.tiling import generate_grid, find_diamonds, GridGeometry
+    from coalescence.tiling import generate_grid, find_diamonds, GridGeometry
 
     grid = generate_grid(L=4)              # 16x16 grid of 0s and 1s
     diamonds = find_diamonds(grid)         # set of (row, col) tuples
@@ -37,7 +37,7 @@ def generate_grid(L: int) -> list[list[int]]:
     Return a fresh 2^L by 2^L grid of random 0/1 values.
 
     Uses Python's `random` module, so callers should seed it via
-    `genart.seeds.init_seed` before calling for reproducibility.
+    `coalescence.seeds.init_seed` before calling for reproducibility.
     """
     if L < 1:
         raise ValueError(f"L must be >= 1, got {L}")

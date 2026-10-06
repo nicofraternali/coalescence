@@ -1,5 +1,5 @@
 [project]
-name = "genart"
+name = "coalescence"
 version = "0.1.0"
 description = "Generative art toolkit and project monorepo: shared palettes, IO, and reproducibility utilities, plus a collection of py5-based sketches."
 readme = "README.md"

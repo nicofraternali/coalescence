@@ -27,6 +27,6 @@ uv run python projects/tiling_holes/sketch.py --seed 4823 --theme JAPAN
 ## Parameters
 
 - `--L` — grid resolution exponent. Default 4.
-- `--theme` — color theme. See `genart.palettes.TILING_THEMES`.
+- `--theme` — color theme. See `coalescence.palettes.TILING_THEMES`.
 - `--seed` — seed for deterministic reproduction.
 - `--save-and-exit` — with `--seed`, save once and exit without interaction.

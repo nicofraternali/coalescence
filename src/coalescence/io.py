@@ -15,7 +15,7 @@ for downstream tools like the gallery builder.
 
 Usage from a sketch:
 
-    from genart.io import save_artwork
+    from coalescence.io import save_artwork
 
     filepath = save_artwork(
         pg,                         # the py5 graphics buffer to save
@@ -44,6 +44,12 @@ from typing import Any
 from PIL import Image, PngImagePlugin
 
 
+# Prefix for PNG text-chunk keys. Pieces saved before the repo was renamed
+# to `coalescence` use the legacy `genart:` prefix; reading accepts both.
+METADATA_PREFIX = "coalescence:"
+LEGACY_METADATA_PREFIXES = ("genart:",)
+
+
 # ---------------------------------------------------------------------------
 # Path resolution.
 # ---------------------------------------------------------------------------
@@ -56,7 +62,7 @@ def _find_repo_root(start: Path) -> Path:
             return candidate
     raise RuntimeError(
         f"Could not find repo root (no .git directory above {start}). "
-        "save_artwork() must be called from a sketch inside the generative-art repo."
+        "save_artwork() must be called from a sketch inside the coalescence repo."
     )
 
 
@@ -191,12 +197,12 @@ def save_artwork(
     with Image.open(temp_path) as img:
         png_info = PngImagePlugin.PngInfo()
         # PNG text chunks must be strings.
-        png_info.add_text("genart:project", project_name)
-        png_info.add_text("genart:seed", str(seed))
-        png_info.add_text("genart:theme", theme_name)
-        png_info.add_text("genart:timestamp_utc", metadata["timestamp_utc"])
-        png_info.add_text("genart:git_commit", metadata["git_commit"])
-        png_info.add_text("genart:metadata_json", json.dumps(metadata))
+        png_info.add_text(f"{METADATA_PREFIX}project", project_name)
+        png_info.add_text(f"{METADATA_PREFIX}seed", str(seed))
+        png_info.add_text(f"{METADATA_PREFIX}theme", theme_name)
+        png_info.add_text(f"{METADATA_PREFIX}timestamp_utc", metadata["timestamp_utc"])
+        png_info.add_text(f"{METADATA_PREFIX}git_commit", metadata["git_commit"])
+        png_info.add_text(f"{METADATA_PREFIX}metadata_json", json.dumps(metadata))
         img.save(png_path, "PNG", pnginfo=png_info)
 
     # Step 3: remove the temp file.
@@ -220,12 +226,17 @@ def read_artwork_metadata(png_path: Path | str) -> dict[str, Any]:
     with Image.open(png_path) as img:
         text_chunks = img.text if hasattr(img, "text") else {}
 
-    if "genart:metadata_json" in text_chunks:
-        return json.loads(text_chunks["genart:metadata_json"])
+    for prefix in (METADATA_PREFIX, *LEGACY_METADATA_PREFIXES):
+        if f"{prefix}metadata_json" in text_chunks:
+            return json.loads(text_chunks[f"{prefix}metadata_json"])
 
     # Fallback: reconstruct from individual chunks.
-    return {
-        key.removeprefix("genart:"): value
-        for key, value in text_chunks.items()
-        if key.startswith("genart:")
-    }
+    for prefix in (METADATA_PREFIX, *LEGACY_METADATA_PREFIXES):
+        chunks = {
+            key.removeprefix(prefix): value
+            for key, value in text_chunks.items()
+            if key.startswith(prefix)
+        }
+        if chunks:
+            return chunks
+    return {}
