@@ -4,7 +4,7 @@ A killer sudoku solver that records every deduction it makes, rendered as a
 dependency graph over the grid: one node per resolved cell, sized by how many
 cells eventually depended on it; arrows from the cells that caused each
 deduction; and a rounded square where the solve started: the givens, or the
-first solved cell when a puzzle has none (like the app's "Extreme" level).
+first solved cell when a puzzle has none (like the app's hardest level, "Killer").
 
 Input-driven rather than random: there is no seed and a single fixed style.
 A piece is reproduced from the puzzle file, the render settings, and the
@@ -12,7 +12,30 @@ commit (all recorded in the PNG metadata).
 
 ## Run
 
-Two stages. First solve the puzzle, which writes `traces/<name>.json`:
+From a screenshot of the app to a piece:
+
+```powershell
+uv run python projects/killer_sudoku/read_screenshot.py "path/to/screenshot.jpg"
+uv run python projects/killer_sudoku/solve.py --puzzle 004
+uv run python projects/killer_sudoku/sketch.py --puzzle 004
+```
+
+`read_screenshot.py` finds the board, the cage outlines, the sums and any
+givens, and writes `puzzles/<name>.yaml` (default name: the next free number).
+It never guesses: anything it isn't certain about (a digit, a cage border) is
+asked in the terminal, and answered digits are saved as new references in
+`reader_templates/`. A cell selected in the app (its teal and shaded
+highlights) doesn't matter. Before writing, it shows the puzzle as a text grid
+to check against the app, and refuses puzzles that fail validation (sums
+total 405, every sum possible for its cage size, no repeated givens).
+
+A screenshot dropped into `screenshots/` can be passed by its file name alone.
+The reader is tuned to one app's look; `screenshots/` keeps the two examples
+the tests use (other screenshots there are ignored by git).
+
+To write a puzzle by hand instead, follow the format of `puzzles/001_hard.yaml`.
+
+Then the two stages. First solve the puzzle, which writes `traces/<name>.json`:
 
 ```powershell
 uv run python projects/killer_sudoku/solve.py --puzzle 001_hard
@@ -58,6 +81,10 @@ uv run pytest
 
 - `killer_solver/` — puzzle loading, deduction rules, solver, trace format.
   Local to this project (no other project reuses it).
+- `killer_solver/screenshot.py` — the screenshot reader (image → cages, sums, givens).
+- `read_screenshot.py` — command-line tool around the reader (questions, check, write).
+- `reader_templates/` — reference images of each digit, as sums and as givens.
+- `screenshots/` — example screenshots used by the tests.
 - `puzzles/` — input puzzles (YAML).
 - `traces/` — solver output (JSON, gitignored, regenerable with `solve.py`).
   Each trace records the commit of the solver that produced it.

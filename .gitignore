@@ -35,3 +35,8 @@ projects/killer_sudoku/traces/
 
 # Local learning notes (VibeWise)
 .vibe-wise/
+
+# killer_sudoku screenshots: only the two examples used by the tests are kept
+projects/killer_sudoku/screenshots/*
+!projects/killer_sudoku/screenshots/Screenshot_20261007_192556_Killer Sudoku.jpg
+!projects/killer_sudoku/screenshots/Screenshot_20261007_193709_Killer Sudoku.jpg

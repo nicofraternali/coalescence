@@ -9,7 +9,7 @@ complete dependency graph as a single high-resolution image:
   - Node size = downstream importance: how many cells eventually
     depended on this one, following the chain of deductions.
   - Where the solve started is drawn as a rounded square: the givens,
-    or the first solved cell when the puzzle has none (e.g. "Extreme").
+    or the first solved cell when the puzzle has none (e.g. the app's "Killer" level).
   - Cell-to-cell cause edges drawn as thin lines with arrowheads
     at the target end. Edges fade with age (older = lighter).
 
