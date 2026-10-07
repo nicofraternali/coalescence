@@ -60,6 +60,10 @@ M_MIN, M_MAX = 10, 40
 G = 1
 DAMPING = 0.9995
 
+# Physics steps per frame. Only changes playback speed; the trajectory (and
+# so the artwork for a given seed) is the same for any value.
+STEPS_PER_FRAME = 5
+
 DEFAULT_THEME = "JAPAN"
 PROJECT_NAME = "pendulum"
 
@@ -94,19 +98,19 @@ initial_a2: float = 0
 # Trace
 path_points: list[tuple[float, float]] = []
 
-# Topology results
-regions: list[list[tuple[int, int]]] = []
+# Topology results. Each region is an (n, 2) int array of (x, y) pixels.
+regions: list[np.ndarray] = []
 region_colors: list[str] = []
-paint_index: int = 0
 quality_metrics: dict = {}
 
 # Lifecycle state machine
-current_state: str = "RUNNING"  # RUNNING -> ANALYZING -> PAINTING -> DONE
+current_state: str = "RUNNING"  # RUNNING -> ANALYZING -> DONE
 
 # Buffers
 pg_physics = None
 pg_art = None
 pg_analysis = None
+analysis_bg: str = ""  # background pg_analysis was cleared with (walls = anything else)
 f_reg = None
 f_italic = None
 f_bold = None
@@ -147,7 +151,7 @@ def reset_composition(use_seed: int | None = None) -> None:
     global seed
     global a1, a2, a1_v, a2_v, path_points, px2, py2
     global r1, r2, m1, m2, initial_a1, initial_a2
-    global regions, region_colors, paint_index, current_state, quality_metrics
+    global regions, region_colors, current_state, quality_metrics, analysis_bg
 
     seed = init_seed(use_seed)
 
@@ -155,7 +159,6 @@ def reset_composition(use_seed: int | None = None) -> None:
     path_points = []
     regions = []
     region_colors = []
-    paint_index = 0
     quality_metrics = {}
 
     # Sample physics parameters from the seeded RNG.
@@ -188,6 +191,7 @@ def reset_composition(use_seed: int | None = None) -> None:
         buf.begin_draw()
         buf.background(colors["bg"])
         buf.end_draw()
+    analysis_bg = colors["bg"]
 
     print(f"Composition: seed={seed}, theme={theme_name}, max_points={max_points}")
 
@@ -236,25 +240,24 @@ def update_physics_step() -> tuple[float, float, float, float] | None:
     return segment
 
 
-def draw_segment(segment: tuple[float, float, float, float]) -> None:
-    """Draw one physics segment onto both the trace and analysis buffers."""
-    x1, y1, x2, y2 = segment
+def draw_segments(segments: list[tuple[float, float, float, float]]) -> None:
+    """
+    Draw this frame's physics segments onto both the trace and analysis
+    buffers. One begin_draw/end_draw per buffer per frame: opening a
+    high-res GPU buffer is the expensive part, not the lines themselves.
+    """
+    if not segments:
+        return
 
-    pg_physics.begin_draw()
-    pg_physics.stroke(py5.color(colors["trace"]))
-    pg_physics.stroke_weight(1.25 * RES_SCALE)
-    pg_physics.stroke_cap(py5.ROUND)
-    pg_physics.stroke_join(py5.ROUND)
-    pg_physics.line(x1, y1, x2, y2)
-    pg_physics.end_draw()
-
-    pg_analysis.begin_draw()
-    pg_analysis.stroke(py5.color(colors["trace"]))
-    pg_analysis.stroke_weight(1.1 * RES_SCALE)
-    pg_analysis.stroke_cap(py5.ROUND)
-    pg_analysis.stroke_join(py5.ROUND)
-    pg_analysis.line(x1, y1, x2, y2)
-    pg_analysis.end_draw()
+    for buf, weight in ((pg_physics, 1.25), (pg_analysis, 1.1)):
+        buf.begin_draw()
+        buf.stroke(py5.color(colors["trace"]))
+        buf.stroke_weight(weight * RES_SCALE)
+        buf.stroke_cap(py5.ROUND)
+        buf.stroke_join(py5.ROUND)
+        for x1, y1, x2, y2 in segments:
+            buf.line(x1, y1, x2, y2)
+        buf.end_draw()
 
 
 def draw_pendulum_overlay() -> None:
@@ -279,40 +282,53 @@ def draw_pendulum_overlay() -> None:
 # Topology — region discovery, adjacency, coloring.
 # ---------------------------------------------------------------------------
 
-def recolor_regions() -> None:
+def _label_empty_regions() -> tuple[np.ndarray, int]:
     """
-    Re-run greedy graph coloring on the existing region map with the
-    current theme's palette. Repaints pg_art from scratch.
+    Read pg_analysis back and label its enclosed empty regions.
 
-    Cheaper than a full reset because the physics simulation and flood-fill
-    are skipped — only the coloring and painting passes re-run.
+    Uses np_pixels: one bulk copy into a (H, W, 4) ARGB uint8 array.
+    (Reading `pixels` and wrapping it in np.array crosses the Java bridge
+    once per pixel, which took ~33 s at 3600x1800.)
+
+    Compares against `analysis_bg`, the background the buffer was cleared
+    with, so labeling still works after a theme change.
     """
-    global region_colors
+    pg_analysis.load_np_pixels()
+    bg_argb = np.array(_hex_to_argb(analysis_bg), dtype=np.uint8)
 
-    # Rebuild adjacency from scratch. We don't store it across composition
-    # state, so we have to recompute. Cheap relative to the full topology
-    # solve since the regions list is already in memory.
-    pg_analysis.load_pixels()
-    raw_pixels = np.array(pg_analysis.pixels, dtype=np.int32)
-    w, h = pg_analysis.width, pg_analysis.height
-    bg_int = py5.color(colors["bg"])
-    is_empty = (raw_pixels == bg_int).reshape((h, w)).astype(np.uint8)
+    # Walls are anything that isn't background. 1 = empty (region candidate),
+    # 0 = wall (will be skipped by labeling).
+    is_empty = np.all(pg_analysis.np_pixels == bg_argb, axis=2).astype(np.uint8)
+
+    # 8-connectivity so diagonals don't artificially split regions.
     structure = np.ones((3, 3), dtype=np.uint8)
-    labeled, _ = ndi_label(is_empty, structure=structure)
+    return ndi_label(is_empty, structure=structure)
 
-    # Map our regions list back to label IDs by checking each region's
-    # first pixel against the labeled array.
-    region_ids: list[int] = []
-    for pixel_list in regions:
-        if not pixel_list:
-            region_ids.append(0)
-            continue
-        x, y = pixel_list[0]
-        region_ids.append(int(labeled[y, x]))
 
-    # Compute adjacency among the labels we care about.
-    valid = set(region_ids)
-    valid.discard(0)
+def _pixels_by_label(labeled: np.ndarray, n_labels: int) -> list[np.ndarray]:
+    """
+    Return, for every label 0..n_labels, an (n, 2) array of its (x, y) pixels.
+
+    One stable sort of the flattened label image groups pixels by label while
+    keeping row-major order (same order np.where gives), instead of scanning
+    the whole image once per label.
+    """
+    flat = labeled.ravel()
+    order = np.argsort(flat, kind="stable")
+    counts = np.bincount(flat, minlength=n_labels + 1)
+    w = labeled.shape[1]
+    return [
+        np.column_stack((idx % w, idx // w))
+        for idx in np.split(order, np.cumsum(counts)[:-1])
+    ]
+
+
+def _region_adjacency(labeled: np.ndarray, valid: set[int]) -> dict[int, set[int]]:
+    """
+    Two regions are adjacent if any pixel of one touches a pixel of the other
+    in the 4-neighborhood. Vectorized via np.roll: shift the labeled array in
+    4 directions, find pairs of distinct positive labels.
+    """
     adjacency: dict[int, set[int]] = {i: set() for i in valid}
     for shift_axis, shift_amount in [(0, 1), (0, -1), (1, 1), (1, -1)]:
         rolled = np.roll(labeled, shift=shift_amount, axis=shift_axis)
@@ -325,6 +341,26 @@ def recolor_regions() -> None:
             if a in valid and b in valid:
                 adjacency[a].add(b)
                 adjacency[b].add(a)
+    return adjacency
+
+
+def recolor_regions() -> None:
+    """
+    Re-run greedy graph coloring on the existing region map with the
+    current theme's palette. Repaints pg_art from scratch.
+
+    Cheaper than a full reset because the physics simulation is skipped.
+    """
+    global region_colors
+
+    # Rebuild adjacency from scratch; it isn't stored across composition state.
+    labeled, _ = _label_empty_regions()
+
+    # Map our regions list back to label IDs via each region's first pixel.
+    region_ids = [int(labeled[px[0][1], px[0][0]]) for px in regions]
+    valid = set(region_ids)
+    valid.discard(0)
+    adjacency = _region_adjacency(labeled, valid)
 
     # Greedy coloring with the new palette.
     palette_pool = [c for c in colors["palette"] if c != colors["bg"]]
@@ -370,24 +406,12 @@ def solve_topology() -> None:
     """
     Discover regions, compute adjacency, assign colors.
 
-    Optimized vs. the original pure-Python flood-fill: uses
-    scipy.ndimage.label for connected-component labeling, and numpy roll
-    operations for adjacency detection.
+    Uses scipy.ndimage.label for connected-component labeling, and numpy
+    roll operations for adjacency detection.
     """
     global regions, region_colors, quality_metrics
 
-    pg_analysis.load_pixels()
-    raw_pixels = np.array(pg_analysis.pixels, dtype=np.int32)
-    w, h = pg_analysis.width, pg_analysis.height
-    bg_int = py5.color(colors["bg"])
-
-    # Walls are anything that isn't background. 1 = empty (region candidate),
-    # 0 = wall (will be skipped by labeling).
-    is_empty = (raw_pixels == bg_int).reshape((h, w)).astype(np.uint8)
-
-    # 8-connectivity so diagonals don't artificially split regions.
-    structure = np.ones((3, 3), dtype=np.uint8)
-    labeled, n_labels = ndi_label(is_empty, structure=structure)
+    labeled, n_labels = _label_empty_regions()
 
     # Identify the "outside" region: any region touching the image border.
     border_labels = set()
@@ -395,37 +419,17 @@ def solve_topology() -> None:
         border_labels.update(np.unique(edge).tolist())
     border_labels.discard(0)  # 0 is wall, not a region
 
-    # Build the {label_id: list_of_pixels} dict for non-outside regions.
-    found: dict[int, list[tuple[int, int]]] = {}
-    for label_id in range(1, n_labels + 1):
-        if label_id in border_labels:
-            continue
-        ys, xs = np.where(labeled == label_id)
-        if len(ys) == 0:
-            continue
-        found[label_id] = list(zip(xs.tolist(), ys.tolist()))
+    # Build the {label_id: pixels} dict for non-outside regions.
+    pixels_by_label = _pixels_by_label(labeled, n_labels)
+    found: dict[int, np.ndarray] = {
+        label_id: pixels_by_label[label_id]
+        for label_id in range(1, n_labels + 1)
+        if label_id not in border_labels and len(pixels_by_label[label_id]) > 0
+    }
 
     print(f"Topology: {n_labels} components, {len(found)} interior regions.")
 
-    # Adjacency: two regions are adjacent if any wall pixel has both labels
-    # in its immediate neighborhood. Vectorized via np.roll: shift the
-    # labeled array in 4 directions, find pairs of distinct positive labels.
-    adjacency: dict[int, set[int]] = {i: set() for i in found.keys()}
-    valid = set(found.keys())
-
-    for shift_axis, shift_amount in [(0, 1), (0, -1), (1, 1), (1, -1)]:
-        rolled = np.roll(labeled, shift=shift_amount, axis=shift_axis)
-        # Wherever both labeled and rolled are positive but different,
-        # record adjacency.
-        mask = (labeled > 0) & (rolled > 0) & (labeled != rolled)
-        if not mask.any():
-            continue
-        pairs = np.stack([labeled[mask], rolled[mask]], axis=1)
-        unique_pairs = np.unique(pairs, axis=0)
-        for a, b in unique_pairs.tolist():
-            if a in valid and b in valid:
-                adjacency[a].add(b)
-                adjacency[b].add(a)
+    adjacency = _region_adjacency(labeled, set(found.keys()))
 
     # Greedy coloring: largest regions first, picking colors not used by
     # any already-colored neighbor.
@@ -482,15 +486,15 @@ def _hex_to_argb(color_hex: str) -> tuple[int, int, int, int]:
 
 
 def paint_regions_batch(
-    pixel_lists: list[list[tuple[int, int]]],
+    pixel_arrays: list[np.ndarray],
     color_hexes: list[str],
 ) -> None:
     """
     Paint all regions at once via direct numpy pixel manipulation.
 
     Uses py5's np_pixels[] interface: a (H, W, 4) uint8 array with ARGB
-    channel order. Much faster than per-pixel circle calls because all
-    assignment happens in numpy with a single load/update pair.
+    channel order. One load/update pair for the whole batch: each pair
+    copies the full high-res buffer from and back to the GPU.
 
     Wraps the pixel operations in begin_draw/end_draw to ensure proper
     state transitions when this is followed by vector drawing on the
@@ -500,23 +504,14 @@ def paint_regions_batch(
     pg_art.load_np_pixels()
     np_pixels = pg_art.np_pixels  # shape (H, W, 4), uint8, ARGB
 
-    for pixel_list, color_hex in zip(pixel_lists, color_hexes):
-        if not pixel_list:
+    for pixels, color_hex in zip(pixel_arrays, color_hexes):
+        if len(pixels) == 0:
             continue
-        argb = _hex_to_argb(color_hex)
-        coords = np.array(pixel_list, dtype=np.int64)
-        xs = coords[:, 0]
-        ys = coords[:, 1]
         # np_pixels is indexed [y, x, channel]; broadcast the 4-tuple across rows.
-        np_pixels[ys, xs] = argb
+        np_pixels[pixels[:, 1], pixels[:, 0]] = _hex_to_argb(color_hex)
 
     pg_art.update_np_pixels()
     pg_art.end_draw()
-
-
-def paint_region_step(pixel_list: list[tuple[int, int]], color_hex: str) -> None:
-    """Single-region wrapper for the streaming PAINTING state in draw()."""
-    paint_regions_batch([pixel_list], [color_hex])
 
 
 def finish_painting() -> None:
@@ -689,32 +684,26 @@ def setup() -> None:
 
 
 def draw() -> None:
-    global current_state, paint_index
+    global current_state
 
     if current_state == "RUNNING":
-        seg = update_physics_step()
-        if seg:
-            draw_segment(seg)
-        if len(path_points) >= max_points:
-            current_state = "ANALYZING"
+        # Several physics steps per frame, drawn in one pass. Stops at exactly
+        # max_points, so the trajectory doesn't depend on STEPS_PER_FRAME.
+        segments = []
+        for _ in range(STEPS_PER_FRAME):
+            seg = update_physics_step()
+            if seg:
+                segments.append(seg)
+            if len(path_points) >= max_points:
+                current_state = "ANALYZING"
+                break
+        draw_segments(segments)
 
     elif current_state == "ANALYZING":
         solve_topology()
-        current_state = "PAINTING"
-
-    elif current_state == "PAINTING":
-        if regions:
-            for _ in range(50):
-                if paint_index < len(regions):
-                    paint_region_step(regions[paint_index], region_colors[paint_index])
-                    paint_index += 1
-                else:
-                    finish_painting()
-                    current_state = "DONE"
-                    break
-        else:
-            finish_painting()
-            current_state = "DONE"
+        paint_regions_batch(regions, region_colors)
+        finish_painting()
+        current_state = "DONE"
 
     py5.image(pg_physics, 0, 0, VIEW_W // 2, VIEW_H)
     py5.image(pg_art, VIEW_W // 2, 0, VIEW_W // 2, VIEW_H)
@@ -729,7 +718,7 @@ def draw() -> None:
 
 
 def key_pressed() -> None:
-    global colors, theme_name, regions, region_colors, paint_index, current_state
+    global colors, theme_name
     if py5.key == "r":
         reset_composition()
     elif py5.key == " ":
