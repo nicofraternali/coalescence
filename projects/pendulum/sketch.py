@@ -1,48 +1,57 @@
 """
 Double pendulum — chaotic trajectory traced and painted as topology.
 
-A double pendulum runs under gravity and damping; its endpoint traces a
-path. After MAX_POINTS samples, the trace is treated as a wall structure
-and the resulting enclosed regions are flood-filled and colored using
-greedy graph coloring (no two adjacent regions share a color, when
-possible).
+A double pendulum in SI units (meters, kilograms, seconds, g = 9.81) is
+integrated with RK4 (see pendulum_physics.py), optionally with viscous
+friction at both joints. Its lower bob traces a path for a fixed span of
+simulated time. The trace is then treated as a wall structure: the
+enclosed regions are labeled and colored with greedy graph coloring (no
+two adjacent regions share a color, when possible).
+
+The art view keeps only closed shapes. Trace segments with the same area
+on both sides (loose strands, such as the fall from the release point and
+the end of the run) are dropped and their gap is filled with the
+surrounding color. The trace view on the left keeps the full path.
 
 Each composition is determined by:
-  - Six random initial conditions (m1, m2, r1, r2, a1_init, a2_init),
-    sampled from fixed ranges using the seeded RNG.
-  - The integration step count (MAX_POINTS).
+  - Six random initial conditions (l1, l2, m1, m2, a1_init, a2_init),
+    sampled from fixed ranges using the seeded RNG. The pendulum is
+    released from rest.
+  - The simulated duration (--duration) and joint friction (--damping).
   - The chosen theme (palette of region colors).
 
 A note on reproducibility: the double pendulum is famously chaotic, but
-the *integrator* is deterministic. Given the same seed, the same code,
-and the same NumPy version, the trajectory reproduces bit-for-bit. The
-chaotic sensitivity only matters if you tried to reconstruct a piece by
-typing initial angles back from a sidecar — at which point precision
-loss would diverge the trajectory.
+the integrator is deterministic. Given the same seed, the same code, and
+the same Python version, the trajectory reproduces bit-for-bit. Typing
+the rounded initial angles back in from a sidecar would not: chaos
+amplifies the lost precision.
 
 Interactive keys:
     r       New random composition (new seed).
-    space   New random theme + reset.
+    space   New random theme (recolors once finished, otherwise resets).
     s       Save the current piece (trace and art views).
 
 Usage:
     uv run python projects/pendulum/sketch.py
     uv run python projects/pendulum/sketch.py --seed 4823 --theme JAPAN
-    uv run python projects/pendulum/sketch.py --seed 4823 --max-points 1000
+    uv run python projects/pendulum/sketch.py --seed 4823 --duration 3 --damping 0.5
 """
 
 from __future__ import annotations
 
 import argparse
+import math
 import random
 
 import numpy as np
 import py5
+from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import label as ndi_label
 
 from coalescence.io import save_artwork
 from coalescence.palettes import PENDULUM_THEMES, list_pendulum_themes
 from coalescence.seeds import init_seed
+from pendulum_physics import G, Pendulum, bob_positions, energy, rk4_step
 
 
 # ---------------------------------------------------------------------------
@@ -53,16 +62,22 @@ VIEW_W = 1200
 VIEW_H = 600
 RES_SCALE = 3.0  # 3.0 -> 3600x1800 high-res buffers
 
-# Physics
-DEFAULT_MAX_POINTS = 750
-R_MIN_BASE, R_MAX_BASE = 100, 300
-M_MIN, M_MAX = 10, 40
-G = 1
-DAMPING = 0.9995
+# Physics (SI units)
+DT = 0.002                    # s per RK4 step; one trace point per step
+DEFAULT_DURATION = 5.0        # s of simulated time per piece
+DEFAULT_DAMPING = 0.0         # joint friction c, N*m*s/rad (0 = undamped)
+L_MIN, L_MAX = 0.5, 2.0       # arm lengths, m
+M_MIN, M_MAX = 1.0, 5.0       # bob masses, kg
 
 # Physics steps per frame. Only changes playback speed; the trajectory (and
-# so the artwork for a given seed) is the same for any value.
-STEPS_PER_FRAME = 5
+# so the artwork for a given seed) is the same for any value. 8 steps of
+# 2 ms is ~16 ms of simulated time per frame: roughly real time at 60 fps.
+STEPS_PER_FRAME = 8
+
+# How far (high-res pixels) to look on each side of a trace segment when
+# deciding whether it bounds two different areas. Must exceed half the
+# analysis wall width (1.1 * RES_SCALE / 2).
+STRAND_SAMPLE_PX = 4.0
 
 DEFAULT_THEME = "JAPAN"
 PROJECT_NAME = "pendulum"
@@ -75,32 +90,34 @@ PROJECT_NAME = "pendulum"
 # CLI-driven config
 seed: int = 0
 theme_name: str = DEFAULT_THEME
-max_points: int = DEFAULT_MAX_POINTS
+duration: float = DEFAULT_DURATION
+damping: float = DEFAULT_DAMPING
 auto_save_and_exit: bool = False
 
 # Theme
 colors: dict = {}
 
 # Physics state
-r1: float = 0
-r2: float = 0
-m1: float = 0
-m2: float = 0
-a1: float = 0
-a2: float = 0
-a1_v: float = 0
-a2_v: float = 0
-px2: float = 0
-py2: float = 0
+pend: Pendulum | None = None
+state: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
 initial_a1: float = 0
 initial_a2: float = 0
+pixels_per_meter: float = 0
+steps_done: int = 0
+n_steps: int = 0
+energy_initial: float = 0
 
-# Trace
+# Trace, in high-res pixels
 path_points: list[tuple[float, float]] = []
 
-# Topology results. Each region is an (n, 2) int array of (x, y) pixels.
-regions: list[np.ndarray] = []
-region_colors: list[str] = []
+# Topology results
+labeled_map: np.ndarray | None = None   # region label per pixel, 0 = wall
+filled_map: np.ndarray | None = None    # same, with walls given the nearest label
+interior_labels: list[int] = []          # labels of enclosed regions, largest first
+adjacency: dict[int, set[int]] = {}
+region_colors: dict[int, str] = {}       # label -> hex color
+boundary_segments: np.ndarray | None = None  # bool per trace segment
+segment_cuts: dict[int, tuple] = {}          # segment index -> (start, end) cut at a crossing
 quality_metrics: dict = {}
 
 # Lifecycle state machine
@@ -133,13 +150,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--theme", type=str, default=DEFAULT_THEME,
                         choices=list_pendulum_themes(),
                         help=f"Theme name. Default: {DEFAULT_THEME}.")
-    parser.add_argument("--max-points", type=int, default=DEFAULT_MAX_POINTS,
-                        dest="max_points",
-                        help=f"Number of trace points before topology pass. "
-                             f"Default: {DEFAULT_MAX_POINTS}.")
+    parser.add_argument("--duration", type=float, default=DEFAULT_DURATION,
+                        help=f"Seconds of simulated motion before the topology pass. "
+                             f"Default: {DEFAULT_DURATION}.")
+    parser.add_argument("--damping", type=float, default=DEFAULT_DAMPING,
+                        help=f"Joint friction coefficient c in N*m*s/rad; 0 = undamped. "
+                             f"Default: {DEFAULT_DAMPING}.")
     parser.add_argument("--save-and-exit", action="store_true",
                         help="With --seed, save both views and exit when DONE.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.duration <= 0:
+        parser.error("--duration must be positive")
+    if args.damping < 0:
+        parser.error("--damping cannot be negative")
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -148,43 +172,40 @@ def parse_args() -> argparse.Namespace:
 
 def reset_composition(use_seed: int | None = None) -> None:
     """Seed RNG, sample new physical parameters, clear all state."""
-    global seed
-    global a1, a2, a1_v, a2_v, path_points, px2, py2
-    global r1, r2, m1, m2, initial_a1, initial_a2
-    global regions, region_colors, current_state, quality_metrics, analysis_bg
+    global seed, pend, state, initial_a1, initial_a2, pixels_per_meter
+    global steps_done, n_steps, energy_initial, path_points
+    global labeled_map, filled_map, interior_labels, adjacency, region_colors
+    global boundary_segments, segment_cuts, current_state, quality_metrics, analysis_bg
 
     seed = init_seed(use_seed)
 
     current_state = "RUNNING"
     path_points = []
-    regions = []
-    region_colors = []
+    labeled_map = filled_map = boundary_segments = None
+    segment_cuts = {}
+    interior_labels = []
+    adjacency = {}
+    region_colors = {}
     quality_metrics = {}
 
     # Sample physics parameters from the seeded RNG.
-    raw_r1 = random.uniform(R_MIN_BASE, R_MAX_BASE) * RES_SCALE
-    raw_r2 = random.uniform(R_MIN_BASE, R_MAX_BASE) * RES_SCALE
+    l1 = random.uniform(L_MIN, L_MAX)
+    l2 = random.uniform(L_MIN, L_MAX)
     m1 = random.uniform(M_MIN, M_MAX)
     m2 = random.uniform(M_MIN, M_MAX)
+    initial_a1 = random.uniform(0, math.tau)
+    initial_a2 = random.uniform(0, math.tau)
 
-    # Scale arms so the maximum reach fits within the safe drawing radius.
-    max_reach = raw_r1 + raw_r2
+    pend = Pendulum(m1=m1, m2=m2, l1=l1, l2=l2, damping=damping)
+    state = (initial_a1, initial_a2, 0.0, 0.0)
+    energy_initial = energy(pend, state)
+    steps_done = 0
+    n_steps = round(duration / DT)
+
+    # Scale meters to pixels so the maximum reach fills the safe drawing radius.
     safe_radius = min(buff_w / 2, CY_POS) * 0.95
-    scale_factor = safe_radius / max_reach if max_reach > safe_radius else 1.0
-    r1 = raw_r1 * scale_factor
-    r2 = raw_r2 * scale_factor
-
-    initial_a1 = random.uniform(0, py5.TWO_PI)
-    initial_a2 = random.uniform(0, py5.TWO_PI)
-    a1, a2 = initial_a1, initial_a2
-    a1_v, a2_v = 0, 0
-
-    cx, cy = buff_w / 2, CY_POS
-    x1 = cx + r1 * py5.sin(a1)
-    y1 = cy + r1 * py5.cos(a1)
-    px2 = x1 + r2 * py5.sin(a2)
-    py2 = y1 + r2 * py5.cos(a2)
-    path_points.append((px2, py2))
+    pixels_per_meter = safe_radius / (l1 + l2)
+    path_points.append(_bob_pixels()[2:])
 
     # Clear buffers.
     for buf in (pg_physics, pg_art, pg_analysis):
@@ -193,51 +214,31 @@ def reset_composition(use_seed: int | None = None) -> None:
         buf.end_draw()
     analysis_bg = colors["bg"]
 
-    print(f"Composition: seed={seed}, theme={theme_name}, max_points={max_points}")
+    print(f"Composition: seed={seed}, theme={theme_name}, "
+          f"duration={duration}s, damping={damping}")
 
 
 # ---------------------------------------------------------------------------
 # Physics.
 # ---------------------------------------------------------------------------
 
-def update_physics_step() -> tuple[float, float, float, float] | None:
-    """Advance one Euler step. Return new line segment if the bob moved."""
-    global a1, a2, a1_v, a2_v, px2, py2
-
-    num1 = -G * (2 * m1 + m2) * py5.sin(a1)
-    num2 = -m2 * G * py5.sin(a1 - 2 * a2)
-    num3 = -2 * py5.sin(a1 - a2) * m2
-    num4 = a2_v * a2_v * r2 + a1_v * a1_v * r1 * py5.cos(a1 - a2)
-    den = r1 * (2 * m1 + m2 - m2 * py5.cos(2 * a1 - 2 * a2))
-    a1_a = (num1 + num2 + num3 * num4) / den
-
-    num1 = 2 * py5.sin(a1 - a2)
-    num2 = a1_v * a1_v * r1 * (m1 + m2)
-    num3 = G * (m1 + m2) * py5.cos(a1)
-    num4 = a2_v * a2_v * r2 * m2 * py5.cos(a1 - a2)
-    den = r2 * (2 * m1 + m2 - m2 * py5.cos(2 * a1 - 2 * a2))
-    a2_a = (num1 * (num2 + num3 + num4)) / den
-
-    a1_v += a1_a
-    a2_v += a2_a
-    a1 += a1_v
-    a2 += a2_v
-    a1_v *= DAMPING
-    a2_v *= DAMPING
-
+def _bob_pixels() -> tuple[float, float, float, float]:
+    """(x1, y1, x2, y2) of both bobs in high-res buffer pixels."""
     cx, cy = buff_w / 2, CY_POS
-    x1 = cx + r1 * py5.sin(a1)
-    y1 = cy + r1 * py5.cos(a1)
-    x2 = x1 + r2 * py5.sin(a2)
-    y2 = y1 + r2 * py5.cos(a2)
+    x1, y1, x2, y2 = bob_positions(pend, state)
+    s = pixels_per_meter
+    return cx + x1 * s, cy + y1 * s, cx + x2 * s, cy + y2 * s
 
-    segment = None
-    if abs(x2 - px2) > 0.1 or abs(y2 - py2) > 0.1:
-        path_points.append((x2, y2))
-        segment = (px2, py2, x2, y2)
 
-    px2, py2 = x2, y2
-    return segment
+def update_physics_step() -> tuple[float, float, float, float]:
+    """Advance one RK4 step and return the new trace segment."""
+    global state, steps_done
+    state = rk4_step(pend, state, DT)
+    steps_done += 1
+    x2, y2 = _bob_pixels()[2:]
+    px2, py2 = path_points[-1]
+    path_points.append((x2, y2))
+    return px2, py2, x2, y2
 
 
 def draw_segments(segments: list[tuple[float, float, float, float]]) -> None:
@@ -262,10 +263,7 @@ def draw_segments(segments: list[tuple[float, float, float, float]]) -> None:
 
 def draw_pendulum_overlay() -> None:
     cx, cy = buff_w / 2, CY_POS
-    x1 = cx + r1 * py5.sin(a1)
-    y1 = cy + r1 * py5.cos(a1)
-    x2 = x1 + r2 * py5.sin(a2)
-    y2 = y1 + r2 * py5.cos(a2)
+    x1, y1, x2, y2 = _bob_pixels()
     s = 1.0 / RES_SCALE
 
     py5.stroke(colors["arm"])
@@ -279,7 +277,7 @@ def draw_pendulum_overlay() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Topology — region discovery, adjacency, coloring.
+# Topology — region discovery, adjacency, coloring, loose strands.
 # ---------------------------------------------------------------------------
 
 def _label_empty_regions() -> tuple[np.ndarray, int]:
@@ -305,31 +303,13 @@ def _label_empty_regions() -> tuple[np.ndarray, int]:
     return ndi_label(is_empty, structure=structure)
 
 
-def _pixels_by_label(labeled: np.ndarray, n_labels: int) -> list[np.ndarray]:
-    """
-    Return, for every label 0..n_labels, an (n, 2) array of its (x, y) pixels.
-
-    One stable sort of the flattened label image groups pixels by label while
-    keeping row-major order (same order np.where gives), instead of scanning
-    the whole image once per label.
-    """
-    flat = labeled.ravel()
-    order = np.argsort(flat, kind="stable")
-    counts = np.bincount(flat, minlength=n_labels + 1)
-    w = labeled.shape[1]
-    return [
-        np.column_stack((idx % w, idx // w))
-        for idx in np.split(order, np.cumsum(counts)[:-1])
-    ]
-
-
 def _region_adjacency(labeled: np.ndarray, valid: set[int]) -> dict[int, set[int]]:
     """
     Two regions are adjacent if any pixel of one touches a pixel of the other
     in the 4-neighborhood. Vectorized via np.roll: shift the labeled array in
     4 directions, find pairs of distinct positive labels.
     """
-    adjacency: dict[int, set[int]] = {i: set() for i in valid}
+    result: dict[int, set[int]] = {i: set() for i in valid}
     for shift_axis, shift_amount in [(0, 1), (0, -1), (1, 1), (1, -1)]:
         rolled = np.roll(labeled, shift=shift_amount, axis=shift_axis)
         mask = (labeled > 0) & (rolled > 0) & (labeled != rolled)
@@ -339,52 +319,179 @@ def _region_adjacency(labeled: np.ndarray, valid: set[int]) -> dict[int, set[int
         unique_pairs = np.unique(pairs, axis=0)
         for a, b in unique_pairs.tolist():
             if a in valid and b in valid:
-                adjacency[a].add(b)
-                adjacency[b].add(a)
-    return adjacency
+                result[a].add(b)
+                result[b].add(a)
+    return result
+
+
+def _fill_walls(labeled: np.ndarray) -> np.ndarray:
+    """
+    Give every wall pixel (label 0) the label of its nearest region pixel.
+
+    Painting this map leaves no background-colored gaps where loose strands
+    were removed; real boundaries are covered by the trace overlay anyway.
+    """
+    indices = distance_transform_edt(
+        labeled == 0, return_distances=False, return_indices=True
+    )
+    return labeled[indices[0], indices[1]]
+
+
+def _boundary_segment_mask(filled: np.ndarray) -> np.ndarray:
+    """
+    For each trace segment, True if it separates two different areas.
+
+    Samples the filled label map STRAND_SAMPLE_PX to the left and right of
+    each segment's midpoint. A loose strand (the fall from the release
+    point, the end of the run, a dead-end loop) has the same area on both
+    sides. Segments with no usable direction are kept.
+    """
+    pts = np.asarray(path_points, dtype=np.float64)
+    n = len(pts) - 1
+    if n < 1:
+        return np.zeros(0, dtype=bool)
+
+    mid = (pts[:-1] + pts[1:]) / 2
+    # Tangent over the neighboring points: steadier than a single tiny segment.
+    i = np.arange(n)
+    tangent = pts[np.minimum(i + 2, n)] - pts[np.maximum(i - 1, 0)]
+    length = np.hypot(tangent[:, 0], tangent[:, 1])
+    usable = length > 1e-9
+    normal = np.zeros_like(tangent)
+    normal[usable, 0] = -tangent[usable, 1] / length[usable]
+    normal[usable, 1] = tangent[usable, 0] / length[usable]
+
+    h, w = filled.shape
+
+    def sample(points: np.ndarray) -> np.ndarray:
+        xs = np.clip(np.rint(points[:, 0]).astype(int), 0, w - 1)
+        ys = np.clip(np.rint(points[:, 1]).astype(int), 0, h - 1)
+        return filled[ys, xs]
+
+    left = sample(mid + normal * STRAND_SAMPLE_PX)
+    right = sample(mid - normal * STRAND_SAMPLE_PX)
+    return (left != right) | ~usable
+
+
+def _crossing_params(p0: np.ndarray, p1: np.ndarray,
+                     q0: np.ndarray, q1: np.ndarray) -> np.ndarray:
+    """Positions t in [0, 1] along segment p0->p1 where it crosses any q segment."""
+    r = p1 - p0
+    s = q1 - q0
+    qp = q0 - p0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        denom = r[0] * s[:, 1] - r[1] * s[:, 0]
+        t = (qp[:, 0] * s[:, 1] - qp[:, 1] * s[:, 0]) / denom
+        u = (qp[:, 0] * r[1] - qp[:, 1] * r[0]) / denom
+    hit = (denom != 0) & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)
+    return t[hit]
+
+
+def _trim_free_ends(keep: np.ndarray) -> tuple[np.ndarray, dict[int, tuple]]:
+    """
+    Cut the trace's two free ends exactly at its first and last self-crossing.
+
+    The side-sampling test can't judge the few pixels next to a crossing, so
+    a short stub could survive where a tail meets the shape. Before the first
+    crossing and after the last one, the path can't enclose anything.
+
+    Returns the updated keep mask and {segment index: (start, end)} overrides
+    for the two segments that get cut at the crossing point.
+    """
+    pts = np.asarray(path_points, dtype=np.float64)
+    p0, p1 = pts[:-1], pts[1:]
+    n = len(p0)
+
+    first = None
+    for i in range(n):
+        ts = _crossing_params(p0[i], p1[i], p0[i + 2:], p1[i + 2:])
+        if len(ts):
+            first = (i, p0[i] + ts.min() * (p1[i] - p0[i]))
+            break
+    if first is None:
+        return keep, {}  # never crosses itself: nothing to trim against
+
+    last = None
+    for i in range(n - 1, -1, -1):
+        ts = _crossing_params(p0[i], p1[i], p0[:max(i - 1, 0)], p1[:max(i - 1, 0)])
+        if len(ts):
+            last = (i, p0[i] + ts.max() * (p1[i] - p0[i]))
+            break
+
+    keep = keep.copy()
+    keep[:first[0]] = False
+    keep[last[0] + 1:] = False
+    keep[first[0]] = keep[last[0]] = True
+
+    cuts = {first[0]: (tuple(first[1]), tuple(p1[first[0]]))}
+    start = cuts.get(last[0], (tuple(p0[last[0]]),))[0]
+    cuts[last[0]] = (start, tuple(last[1]))
+    return keep, cuts
+
+
+def _greedy_colors() -> dict[int, str]:
+    """Largest regions first, each picking a color unused by colored neighbors."""
+    palette_pool = [c for c in colors["palette"] if c != colors["bg"]]
+    assigned: dict[int, str] = {}
+    for r_id in interior_labels:
+        used = {assigned[n] for n in adjacency[r_id] if n in assigned}
+        candidates = [c for c in palette_pool if c not in used]
+        assigned[r_id] = random.choice(candidates if candidates else palette_pool)
+    return assigned
+
+
+def solve_topology() -> None:
+    """Discover regions, adjacency, colors, and which trace segments to keep."""
+    global labeled_map, filled_map, interior_labels, adjacency, region_colors
+    global boundary_segments, segment_cuts, quality_metrics
+
+    labeled, n_labels = _label_empty_regions()
+
+    # Identify the "outside" region: any region touching the image border.
+    border_labels = set()
+    for edge in (labeled[0, :], labeled[-1, :], labeled[:, 0], labeled[:, -1]):
+        border_labels.update(np.unique(edge).tolist())
+    border_labels.discard(0)  # 0 is wall, not a region
+
+    sizes = np.bincount(labeled.ravel(), minlength=n_labels + 1)
+    interior = [i for i in range(1, n_labels + 1) if i not in border_labels and sizes[i] > 0]
+    interior_labels = sorted(interior, key=lambda i: sizes[i], reverse=True)
+    print(f"Topology: {n_labels} components, {len(interior_labels)} interior regions.")
+
+    labeled_map = labeled
+    adjacency = _region_adjacency(labeled, set(interior_labels))
+    region_colors = _greedy_colors()
+    filled_map = _fill_walls(labeled)
+    boundary_segments, segment_cuts = _trim_free_ends(_boundary_segment_mask(filled_map))
+
+    # Quality metrics for the metadata.
+    interior_sizes = sizes[interior_labels] if interior_labels else np.zeros(0)
+    quality_metrics = {
+        "n_components_total": int(n_labels),
+        "n_regions_interior": len(interior_labels),
+        "n_regions_outside": len(border_labels),
+        "trace_segments_total": int(len(boundary_segments)),
+        "trace_segments_dropped": int((~boundary_segments).sum()),
+    }
+    if len(interior_sizes):
+        quality_metrics.update({
+            "region_size_mean": float(np.mean(interior_sizes)),
+            "region_size_std": float(np.std(interior_sizes)),
+            "region_size_min": int(np.min(interior_sizes)),
+            "region_size_max": int(np.max(interior_sizes)),
+        })
 
 
 def recolor_regions() -> None:
     """
     Re-run greedy graph coloring on the existing region map with the
-    current theme's palette. Repaints pg_art from scratch.
-
-    Cheaper than a full reset because the physics simulation is skipped.
+    current theme's palette and repaint both views. Physics and topology
+    are kept from the last solve.
     """
     global region_colors
+    region_colors = _greedy_colors()
 
-    # Rebuild adjacency from scratch; it isn't stored across composition state.
-    labeled, _ = _label_empty_regions()
-
-    # Map our regions list back to label IDs via each region's first pixel.
-    region_ids = [int(labeled[px[0][1], px[0][0]]) for px in regions]
-    valid = set(region_ids)
-    valid.discard(0)
-    adjacency = _region_adjacency(labeled, valid)
-
-    # Greedy coloring with the new palette.
-    palette_pool = [c for c in colors["palette"] if c != colors["bg"]]
-    sorted_indices = sorted(range(len(regions)), key=lambda i: len(regions[i]), reverse=True)
-    assigned: dict[int, str] = {}
-    new_colors: list[str] = [""] * len(regions)
-    for idx in sorted_indices:
-        r_id = region_ids[idx]
-        if r_id == 0:
-            new_colors[idx] = random.choice(palette_pool)
-            continue
-        used = {assigned[n] for n in adjacency[r_id] if n in assigned}
-        candidates = [c for c in palette_pool if c not in used]
-        chosen = random.choice(candidates if candidates else palette_pool)
-        assigned[r_id] = chosen
-        new_colors[idx] = chosen
-    region_colors[:] = new_colors
-
-    # Repaint pg_art from scratch in a single batched pass.
-    pg_art.begin_draw()
-    pg_art.background(colors["bg"])
-    pg_art.end_draw()
-
-    paint_regions_batch(regions, region_colors)
+    paint_regions()
     finish_painting()
 
     # Also repaint pg_physics: same trajectory, but redraw it with the new
@@ -402,73 +509,6 @@ def recolor_regions() -> None:
     pg_physics.end_shape()
     pg_physics.end_draw()
 
-def solve_topology() -> None:
-    """
-    Discover regions, compute adjacency, assign colors.
-
-    Uses scipy.ndimage.label for connected-component labeling, and numpy
-    roll operations for adjacency detection.
-    """
-    global regions, region_colors, quality_metrics
-
-    labeled, n_labels = _label_empty_regions()
-
-    # Identify the "outside" region: any region touching the image border.
-    border_labels = set()
-    for edge in (labeled[0, :], labeled[-1, :], labeled[:, 0], labeled[:, -1]):
-        border_labels.update(np.unique(edge).tolist())
-    border_labels.discard(0)  # 0 is wall, not a region
-
-    # Build the {label_id: pixels} dict for non-outside regions.
-    pixels_by_label = _pixels_by_label(labeled, n_labels)
-    found: dict[int, np.ndarray] = {
-        label_id: pixels_by_label[label_id]
-        for label_id in range(1, n_labels + 1)
-        if label_id not in border_labels and len(pixels_by_label[label_id]) > 0
-    }
-
-    print(f"Topology: {n_labels} components, {len(found)} interior regions.")
-
-    adjacency = _region_adjacency(labeled, set(found.keys()))
-
-    # Greedy coloring: largest regions first, picking colors not used by
-    # any already-colored neighbor.
-    sorted_ids = sorted(found.keys(), key=lambda k: len(found[k]), reverse=True)
-    palette_pool = [c for c in colors["palette"] if c != colors["bg"]]
-    assigned: dict[int, str] = {}
-    for r_id in sorted_ids:
-        used = {assigned[n] for n in adjacency[r_id] if n in assigned}
-        candidates = [c for c in palette_pool if c not in used]
-        assigned[r_id] = random.choice(candidates if candidates else palette_pool)
-
-    # Build painting lists.
-    regions.clear()
-    region_colors.clear()
-    export_order = list(found.keys())
-    random.shuffle(export_order)
-    for r_id in export_order:
-        regions.append(found[r_id])
-        region_colors.append(assigned[r_id])
-
-    # Compute quality metrics for the metadata.
-    sizes = [len(p) for p in found.values()]
-    if sizes:
-        quality_metrics = {
-            "n_components_total": int(n_labels),
-            "n_regions_interior": len(found),
-            "n_regions_outside": len(border_labels),
-            "region_size_mean": float(np.mean(sizes)),
-            "region_size_std": float(np.std(sizes)),
-            "region_size_min": int(np.min(sizes)),
-            "region_size_max": int(np.max(sizes)),
-        }
-    else:
-        quality_metrics = {
-            "n_components_total": int(n_labels),
-            "n_regions_interior": 0,
-            "n_regions_outside": len(border_labels),
-        }
-
 
 def _hex_to_argb(color_hex: str) -> tuple[int, int, int, int]:
     """
@@ -485,55 +525,65 @@ def _hex_to_argb(color_hex: str) -> tuple[int, int, int, int]:
     return (255, r, g, b)
 
 
-def paint_regions_batch(
-    pixel_arrays: list[np.ndarray],
-    color_hexes: list[str],
-) -> None:
+def paint_regions() -> None:
     """
-    Paint all regions at once via direct numpy pixel manipulation.
+    Paint every pixel of pg_art from the filled label map in one pass.
 
-    Uses py5's np_pixels[] interface: a (H, W, 4) uint8 array with ARGB
-    channel order. One load/update pair for the whole batch: each pair
+    A lookup table maps each label to its ARGB color (outside and walls
+    next to the outside stay background). One load/update pair: each pair
     copies the full high-res buffer from and back to the GPU.
-
-    Wraps the pixel operations in begin_draw/end_draw to ensure proper
-    state transitions when this is followed by vector drawing on the
-    same buffer (e.g., finish_painting overlaying the trace line).
     """
+    lut = np.empty((int(filled_map.max()) + 1, 4), dtype=np.uint8)
+    lut[:] = _hex_to_argb(colors["bg"])
+    for r_id, color_hex in region_colors.items():
+        lut[r_id] = _hex_to_argb(color_hex)
+
     pg_art.begin_draw()
     pg_art.load_np_pixels()
-    np_pixels = pg_art.np_pixels  # shape (H, W, 4), uint8, ARGB
-
-    for pixels, color_hex in zip(pixel_arrays, color_hexes):
-        if len(pixels) == 0:
-            continue
-        # np_pixels is indexed [y, x, channel]; broadcast the 4-tuple across rows.
-        np_pixels[pixels[:, 1], pixels[:, 0]] = _hex_to_argb(color_hex)
-
+    pg_art.np_pixels[:] = lut[filled_map]
     pg_art.update_np_pixels()
     pg_art.end_draw()
 
 
 def finish_painting() -> None:
     """
-    Overlay the crisp continuous trace and burn the physics metadata
-    into pg_art so the saved PNG carries the values that produced it.
+    Overlay the trace segments that bound regions, and burn the physics
+    metadata into pg_art so the saved PNG carries the values that produced it.
     """
     pg_art.begin_draw()
 
-    # Trace overlay.
+    # Trace overlay: one polyline per run of consecutive boundary segments.
     pg_art.no_fill()
     pg_art.stroke(colors["trace"])
     pg_art.stroke_weight(1.25 * RES_SCALE)
     pg_art.stroke_cap(py5.ROUND)
     pg_art.stroke_join(py5.ROUND)
-    pg_art.begin_shape()
-    for x, y in path_points:
-        pg_art.vertex(x, y)
-    pg_art.end_shape()
+    in_run = False
+    for i, keep in enumerate(boundary_segments):
+        start, end = segment_cuts.get(i, (path_points[i], path_points[i + 1]))
+        if keep and not in_run:
+            pg_art.begin_shape()
+            pg_art.vertex(*start)
+            in_run = True
+        if keep:
+            pg_art.vertex(*end)
+        elif in_run:
+            pg_art.end_shape()
+            in_run = False
+    if in_run:
+        pg_art.end_shape()
 
     _draw_metadata_into_buffer(pg_art)
     pg_art.end_draw()
+
+
+def _metadata_columns() -> tuple[list[str], list[str], list[str], list[str]]:
+    """Labels and values for the two metadata rows (bob 1 on top, bob 2 below)."""
+    labels1 = ["m₁=", "r₁=", "α₁="]
+    vals1 = [f"{pend.m1:.2f}", f"{pend.l1:.2f}", f"{initial_a1:.2f}"]
+    labels2 = ["m₂=", "r₂=", "α₂="]
+    vals2 = [f"{pend.m2:.2f}", f"{pend.l2:.2f}", f"{initial_a2:.2f}"]
+    return labels1, vals1, labels2, vals2
 
 
 def _draw_metadata_into_buffer(buf) -> None:
@@ -550,13 +600,7 @@ def _draw_metadata_into_buffer(buf) -> None:
     buf.fill(colors["text"])
     buf.text_align(py5.LEFT, py5.BOTTOM)
 
-    dr1 = r1 / RES_SCALE
-    dr2 = r2 / RES_SCALE
-
-    labels1 = ["m\u2081=", "r\u2081=", "α\u2081="]
-    vals1 = [f"{m1:.2f}", f"{dr1:.2f}", f"{initial_a1:.2f}"]
-    labels2 = ["m\u2082=", "r\u2082=", "α\u2082="]
-    vals2 = [f"{m2:.2f}", f"{dr2:.2f}", f"{initial_a2:.2f}"]
+    labels1, vals1, labels2, vals2 = _metadata_columns()
 
     max_label_w = []
     max_val_w = []
@@ -598,18 +642,12 @@ def _draw_metadata_into_buffer(buf) -> None:
 # ---------------------------------------------------------------------------
 
 def draw_metadata_columns() -> None:
-    dr1 = r1 / RES_SCALE
-    dr2 = r2 / RES_SCALE
-
     center_x = VIEW_W * 0.75
     py5.fill(colors["text"])
     py5.text_font(f_italic)
     py5.text_align(py5.LEFT, py5.BOTTOM)
 
-    labels1 = ["m\u2081=", "r\u2081=", "α\u2081="]
-    vals1 = [f"{m1:.2f}", f"{dr1:.2f}", f"{initial_a1:.2f}"]
-    labels2 = ["m\u2082=", "r\u2082=", "α\u2082="]
-    vals2 = [f"{m2:.2f}", f"{dr2:.2f}", f"{initial_a2:.2f}"]
+    labels1, vals1, labels2, vals2 = _metadata_columns()
 
     max_label_w = []
     max_val_w = []
@@ -645,12 +683,19 @@ def draw_metadata_columns() -> None:
 
 def save_current() -> None:
     """Save both the trace view and the painted art view, with full metadata."""
+    energy_final = energy(pend, state)
     params = {
-        "max_points": max_points,
-        "m1": m1, "m2": m2,
-        "r1": r1 / RES_SCALE, "r2": r2 / RES_SCALE,
+        "duration_s": duration,
+        "dt_s": DT,
+        "damping": damping,
+        "m1_kg": pend.m1, "m2_kg": pend.m2,
+        "l1_m": pend.l1, "l2_m": pend.l2,
         "a1_init": initial_a1, "a2_init": initial_a2,
-        "g": G, "damping": DAMPING,
+        "g": G,
+        "integrator": "rk4",
+        "energy_initial_J": energy_initial,
+        "energy_final_J": energy_final,
+        "pixels_per_meter": pixels_per_meter,
         "res_scale": RES_SCALE,
         "quality_metrics": quality_metrics,
     }
@@ -688,20 +733,18 @@ def draw() -> None:
 
     if current_state == "RUNNING":
         # Several physics steps per frame, drawn in one pass. Stops at exactly
-        # max_points, so the trajectory doesn't depend on STEPS_PER_FRAME.
+        # n_steps, so the trajectory doesn't depend on STEPS_PER_FRAME.
         segments = []
         for _ in range(STEPS_PER_FRAME):
-            seg = update_physics_step()
-            if seg:
-                segments.append(seg)
-            if len(path_points) >= max_points:
+            segments.append(update_physics_step())
+            if steps_done >= n_steps:
                 current_state = "ANALYZING"
                 break
         draw_segments(segments)
 
     elif current_state == "ANALYZING":
         solve_topology()
-        paint_regions_batch(regions, region_colors)
+        paint_regions()
         finish_painting()
         current_state = "DONE"
 
@@ -723,16 +766,14 @@ def key_pressed() -> None:
         reset_composition()
     elif py5.key == " ":
         # Re-color the existing regions with a new theme.
-        # Only meaningful once the topology has been solved (i.e., we have
-        # a `regions` list to recolor). Before that, fall back to reset.
-        if current_state == "DONE" and regions:
-            theme_name = random.choice(list_pendulum_themes())
-            colors = PENDULUM_THEMES[theme_name]
+        # Only meaningful once the topology has been solved. Before that,
+        # fall back to reset.
+        theme_name = random.choice(list_pendulum_themes())
+        colors = PENDULUM_THEMES[theme_name]
+        if current_state == "DONE" and interior_labels:
             recolor_regions()
             print(f"Theme: {theme_name} (recolored existing regions)")
         else:
-            theme_name = random.choice(list_pendulum_themes())
-            colors = PENDULUM_THEMES[theme_name]
             reset_composition()
             print(f"Theme: {theme_name} (full reset)")
     elif py5.key == "s":
@@ -746,7 +787,8 @@ def key_pressed() -> None:
 if __name__ == "__main__":
     args = parse_args()
     theme_name = args.theme
-    max_points = args.max_points
+    duration = args.duration
+    damping = args.damping
     auto_save_and_exit = args.save_and_exit
     seed = args.seed if args.seed is not None else 0
     py5.run_sketch()

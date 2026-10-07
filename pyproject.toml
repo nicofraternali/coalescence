@@ -28,6 +28,6 @@ requires = ["uv_build>=0.11.7,<0.12.0"]
 build-backend = "uv_build"
 
 [tool.pytest.ini_options]
-# killer_sudoku keeps its solver package next to its scripts, not in src/.
-pythonpath = ["projects/killer_sudoku"]
-testpaths = ["projects/killer_sudoku/tests"]
+# Project-local modules (killer_solver, pendulum_physics) live next to their sketches, not in src/.
+pythonpath = ["projects/killer_sudoku", "projects/pendulum"]
+testpaths = ["projects/killer_sudoku/tests", "projects/pendulum/tests"]

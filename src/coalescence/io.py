@@ -23,7 +23,7 @@ Usage from a sketch:
         seed=4823,
         theme_name="JAPAN",
         params={"m1": 24.3, "m2": 31.7, "r1": 220.5, "r2": 185.2,
-                "a1_init": 2.14, "a2_init": 4.78, "max_points": 750},
+                "a1_init": 2.14, "a2_init": 4.78, "duration_s": 5.0},
     )
     print(f"Saved: {filepath}")
 

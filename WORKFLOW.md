@@ -218,6 +218,20 @@ One environment and one `uv.lock` for every project.
   (`killer_sudoku_001_hard_<date>_<time>_<mode>_<step>.png`). New
   `git_provenance()` helper for non-PNG outputs.
 
+## Pendulum — speed, real physics, clean art (October 2026)
+
+- Speed (commit 5401a65): several physics steps per frame, bulk pixel
+  readback via `np_pixels`, single-pass painting. ~85 s → ~26 s per piece.
+- Physics moved to `projects/pendulum/pendulum_physics.py`: SI units, RK4
+  (2 ms step), Lagrangian mass-matrix form, viscous joint friction.
+  `--max-points` replaced by `--duration` (seconds) and `--damping`
+  (N·m·s/rad, 0 = undamped). Tests in `projects/pendulum/tests/`.
+- **Seeds changed:** every pendulum seed now produces a different piece.
+  Older pieces stay reproducible from the commit in their metadata.
+- Art view keeps only closed shapes: trace segments with the same area on
+  both sides are dropped, wall pixels take the nearest region's color, and
+  the two free ends are cut at the first and last self-crossing.
+
 ## Stage 5 — Blog bridge (planned)
 
 `scripts/curate.py` to promote outputs into `curated/`, and
