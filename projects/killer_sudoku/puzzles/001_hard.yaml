@@ -2,10 +2,9 @@ puzzle_id: 001_hard
 source: "Killer Sudoku by Oakever, id:270719"
 difficulty: Hard Mode
 
-# This file is a complete, structurally valid killer sudoku puzzle in YAML
-# form. It demonstrates the input format for the solver. The cage layout
-# is real (every cell covered, sums total 405) but the puzzle is not
-# guaranteed to be solvable — this is purely a formatting reference.
+# A real puzzle from the app, transcribed by hand. The solver resolves
+# all 81 cells with its current rules. It also serves as the reference
+# for the input format.
 #
 # Conventions:
 #   - Cells are [row, col], zero-indexed.

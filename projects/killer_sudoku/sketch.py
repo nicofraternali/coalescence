@@ -6,13 +6,12 @@ complete dependency graph as a single high-resolution image:
 
   - One node per CellResolved event, positioned at the cell's grid
     location (grid-aligned layout).
-  - Givens are distinguished from inferred resolutions.
+  - Node size = downstream importance: how many cells eventually
+    depended on this one, following the chain of deductions.
+  - Where the solve started is drawn as a rounded square: the givens,
+    or the first solved cell when the puzzle has none (e.g. "Extreme").
   - Cell-to-cell cause edges drawn as thin lines with arrowheads
     at the target end. Edges fade with age (older = lighter).
-  - Structural causes (cages, houses) shown as a single faint tint
-    on the cage region or house, applied to every region that
-    participated causally in any event. Density of overlap encodes
-    structural importance.
 
 Two node-coloring modes (--color-mode, or 'm'):
   "inference"
@@ -30,7 +29,6 @@ Usage:
 Interactive keys:
   Press 's' to save a hi-res PNG with metadata (via save_artwork).
   Press 'm' to toggle the color mode between "inference" and "step".
-  Press 'o' to toggle structural overlays (cell-background tints) on/off.
   Press 'c' to toggle cage outlines and sums on/off.
   Press 'r' to re-load the trace and re-render.
 
@@ -44,8 +42,8 @@ Interactive keys:
 import argparse
 import json
 import sys
+import math
 from pathlib import Path
-from collections import defaultdict
 
 import py5
 
@@ -71,17 +69,19 @@ MARGIN_RATIO = 0.08
 
 # Visual weights (relative to grid cell size `s`)
 NODE_RADIUS_RATIO = 0.16
-GIVEN_RADIUS_RATIO = 0.18
 EDGE_WEIGHT_RATIO = 0.014
 EDGE_AGE_FADE = 0.45
-OVERLAY_OPACITY = 22
 DIGIT_TEXT_RATIO = 0.30
 
+# Node size from downstream importance (sqrt keeps big cascades from
+# dwarfing everything else).
 SIZE_BY_IMPORTANCE = True
 IMPORTANCE_MIN_SCALE = 1.0
 IMPORTANCE_MAX_SCALE = 1.5
 
-SHOW_OVERLAYS = True
+# Start marker: a rounded square of the same area as the circle.
+START_CORNER_RATIO = 0.25   # corner radius relative to the square's half-side
+
 COLOR_MODE = "step"   # "inference" or "step"
 
 # Cage outlines and sums — show the puzzle's constraint structure.
@@ -91,8 +91,9 @@ SHOW_CAGES = True
 CAGE_LINE_WEIGHT_RATIO = 0.012    # cage boundary stroke weight
 CAGE_DASH_LEN_RATIO = 0.06        # length of each dash
 CAGE_DASH_GAP_RATIO = 0.045       # gap between dashes
+CAGE_OUTLINE_INSET_RATIO = 0.05   # each cage's outline sits this far inside its cells
 CAGE_SUM_TEXT_RATIO = 0.13        # cage sum font size relative to cell
-CAGE_SUM_INSET_RATIO = 0.08       # offset from cell corner for sum text
+CAGE_SUM_PAD_RATIO = 0.02         # background patch around the sum label
 
 # Render only events with step <= MAX_STEP. Set to None to render all
 # events (the full final frame). Used for generating intermediate frames
@@ -100,9 +101,12 @@ CAGE_SUM_INSET_RATIO = 0.08       # offset from cell corner for sum text
 #
 # Example: setting MAX_STEP = 30 produces the image that would result if
 # the solver had stopped after step 30 — the partial dependency graph
-# at that point, with overlay participation computed only from those
-# 30 events.
+# at that point, with importance computed only from those 30 events.
 MAX_STEP = None
+
+# Key codes py5 doesn't name (Java's KeyEvent.VK_HOME / VK_END).
+KEY_HOME = 36
+KEY_END = 35
 
 DRAW_ARROWS = True
 ARROW_SIZE_RATIO = 0.07
@@ -123,7 +127,6 @@ THEME = {
     "cage_sum_text": "#5A4D38",  # cage sum text — darker than cage line
     "edge": "#3A332A",
     "node_text": "#1A1612",      # single digit color used for ALL nodes
-    "overlay": "#6B5D4A",
     "inf_given":                          "#26625B",
     "inf_cage_initial_pruning":           "#E37E52",
     "inf_locked_cage_elimination":        "#BC4A31",
@@ -149,10 +152,9 @@ cage_of = {}
 cage_cells = {}
 cage_sum = {}
 givens_set = set()
-cages_used_as_cause = set()
-houses_used_as_cause = set()
 event_by_step = {}
-out_degree = {}
+downstream = {}     # step -> number of shown cells that eventually depended on it
+start_steps = set()  # where the solve started: the givens, or the first solved cell
 full_solve_length = 0   # total events in the underlying solve; used for color stability
 pg = None
 
@@ -190,6 +192,13 @@ def load_trace():
     for g in puzzle.get("givens", []):
         givens_set.add(tuple(g["cell"]))
 
+    # Not "every cell with no cell cause": the solver doesn't record
+    # eliminations, so mid-solve cage deductions would look like starts too.
+    start_steps.clear()
+    start_steps.update(e["step"] for e in raw_events if e["inference_type"] == "given")
+    if not start_steps and raw_events:
+        start_steps.add(min(e["step"] for e in raw_events))
+
     print(f"Loaded trace: {_trace_path()}")
     print(f"  Solver commit: {trace_data.get('git_commit', 'unknown')}")
     print(f"  Puzzle: {puzzle.get('puzzle_id')}")
@@ -212,27 +221,32 @@ def apply_filter():
 
     event_by_step = {e["step"]: e for e in events}
 
-    cages_used_as_cause.clear()
-    houses_used_as_cause.clear()
-    out_degree.clear()
+    # Direct children of each step (cells it was a cause of).
+    children = {e["step"]: [] for e in events}
     for ev in events:
-        out_degree.setdefault(ev["step"], 0)
-        for cause in ev.get("causes", ()):
-            t = cause.get("type")
-            if t == "cage":
-                cages_used_as_cause.add(cause["cage_id"])
-            elif t == "house":
-                houses_used_as_cause.add(
-                    (cause["house_type"], cause["index"])
-                )
-            elif t == "cell":
-                src = cause["step"]
-                out_degree[src] = out_degree.get(src, 0) + 1
+        cell_causes = [c["step"] for c in ev.get("causes", ()) if c.get("type") == "cell"]
+        for src in cell_causes:
+            if src in children:
+                children[src].append(ev["step"])
+
+    # Downstream importance: every cell reachable by following the arrows.
+    # Causes always come earlier, so walking steps from last to first means
+    # each child's set is complete before its parents need it. A cell with
+    # several causes counts once for each ancestor.
+    reachable = {}
+    for step in sorted(children, reverse=True):
+        acc = set()
+        for child in children[step]:
+            acc.add(child)
+            acc |= reachable[child]
+        reachable[step] = acc
+    downstream.clear()
+    downstream.update({step: len(r) for step, r in reachable.items()})
 
     if MAX_STEP is not None:
-        print(f"  step={MAX_STEP} → showing {len(events)}/{full_solve_length} events")
+        print(f"  step={MAX_STEP} -> showing {len(events)}/{full_solve_length} events")
     else:
-        print(f"  step=FINAL → showing all {len(events)} events")
+        print(f"  step=FINAL -> showing all {len(events)} events")
 
 
 # ----------------------------------------------------------------------------
@@ -288,8 +302,6 @@ def render():
     pg.push_matrix()
     pg.translate(margin, margin)
 
-    _draw_cage_overlays(s)
-    _draw_house_overlays(s)
     _draw_grid(s)
     _draw_cages(s)
     _draw_edges(s)
@@ -297,7 +309,17 @@ def render():
 
     pg.pop_matrix()
     pg.end_draw()
-    print(f"Render complete ({COLOR_MODE} mode, overlays {'on' if SHOW_OVERLAYS else 'off'}).")
+    print(f"Render complete ({COLOR_MODE} mode).")
+
+
+def _node_radius(ev, s):
+    """Node radius: base size scaled by downstream importance."""
+    scale = 1.0
+    max_down = max(downstream.values(), default=0)
+    if SIZE_BY_IMPORTANCE and max_down > 0:
+        t = math.sqrt(downstream.get(ev["step"], 0) / max_down)
+        scale = IMPORTANCE_MIN_SCALE + t * (IMPORTANCE_MAX_SCALE - IMPORTANCE_MIN_SCALE)
+    return s * NODE_RADIUS_RATIO * scale
 
 
 def _draw_grid(s):
@@ -318,142 +340,149 @@ def _draw_grid(s):
 
 
 def _draw_cages(s):
-    """Draw dashed cage boundaries between cells in different cages,
-    plus the cage's sum in the top-left corner of each cage.
+    """Draw each cage as its own dashed outline, inset inside its cells,
+    plus the cage's sum in its top-left cell.
 
-    Skips edges that coincide with 3x3 box boundaries — those are
-    already drawn solid by the grid major lines.
+    Like the puzzle apps: neighboring cages never share a line, so their
+    common border shows two parallel dashed lines with a gap between them.
     """
     if not SHOW_CAGES:
         return
 
-    import math
-
-    line_col = py5.color(THEME["cage_line"])
-    text_col = py5.color(THEME["cage_sum_text"])
-    weight = s * CAGE_LINE_WEIGHT_RATIO
+    inset = s * CAGE_OUTLINE_INSET_RATIO
     dash_len = s * CAGE_DASH_LEN_RATIO
     gap_len = s * CAGE_DASH_GAP_RATIO
 
-    pg.stroke(line_col)
-    pg.stroke_weight(weight)
+    pg.stroke(py5.color(THEME["cage_line"]))
+    pg.stroke_weight(s * CAGE_LINE_WEIGHT_RATIO)
     pg.no_fill()
     pg.stroke_cap(py5.SQUARE)
+    for cells in cage_cells.values():
+        for loop in _cage_outline_loops(cells, s, inset):
+            _dashed_path(loop, dash_len, gap_len)
 
-    # Iterate every cell, check right neighbor and bottom neighbor.
-    # If they belong to different cages AND the edge isn't a 3x3 box
-    # boundary, draw a dashed line along the boundary.
-    for r in range(9):
-        for c in range(9):
-            x, y = c * s, r * s
-            my_cage = cage_of.get((r, c))
-            if my_cage is None:
-                continue
-
-            # Right edge — between (r, c) and (r, c+1)
-            if c < 8:
-                neighbor_cage = cage_of.get((r, c + 1))
-                if neighbor_cage != my_cage:
-                    if (c + 1) % 3 != 0:   # not a 3x3 box boundary
-                        _dashed_line(x + s, y, x + s, y + s, dash_len, gap_len)
-
-            # Bottom edge — between (r, c) and (r+1, c)
-            if r < 8:
-                neighbor_cage = cage_of.get((r + 1, c))
-                if neighbor_cage != my_cage:
-                    if (r + 1) % 3 != 0:
-                        _dashed_line(x, y + s, x + s, y + s, dash_len, gap_len)
-
-    # Cage sums — drawn in the top-left cell of each cage.
+    # Cage sums in the top-left cell (smallest row, then column), on a small
+    # background patch that interrupts the dashed corner, as in the apps.
     text_size = s * CAGE_SUM_TEXT_RATIO
-    inset = s * CAGE_SUM_INSET_RATIO
-    pg.no_stroke()
-    pg.fill(text_col)
+    pad = s * CAGE_SUM_PAD_RATIO
     pg.text_size(text_size)
     pg.text_align(py5.LEFT, py5.TOP)
-
-    # Find top-left cell of each cage: smallest row, then smallest col.
     for cage_id, cells in cage_cells.items():
-        sorted_cells = sorted(cells)   # sorts by row then col
-        tl_r, tl_c = sorted_cells[0]
+        tl_r, tl_c = min(cells)
+        label = str(cage_sum[cage_id])
         x = tl_c * s + inset
         y = tl_r * s + inset
-        pg.text(str(cage_sum[cage_id]), x, y)
+        pg.no_stroke()
+        pg.fill(py5.color(THEME["bg"]))
+        pg.rect(x - pad, y - pad, pg.text_width(label) + 2 * pad, text_size + 2 * pad)
+        pg.fill(py5.color(THEME["cage_sum_text"]))
+        pg.text(label, x, y)
 
 
-def _dashed_line(x1, y1, x2, y2, dash_len, gap_len):
-    """Draw a dashed line from (x1, y1) to (x2, y2)."""
-    import math
-    dx, dy = x2 - x1, y2 - y1
-    length = math.hypot(dx, dy)
-    if length < 1e-6:
-        return
-    ux, uy = dx / length, dy / length
-    pos = 0.0
-    while pos < length:
-        end = min(pos + dash_len, length)
-        sx = x1 + ux * pos
-        sy = y1 + uy * pos
-        ex = x1 + ux * end
-        ey = y1 + uy * end
-        pg.line(sx, sy, ex, ey)
-        pos = end + gap_len
+def _cage_outline_loops(cells, s, d):
+    """
+    Closed outlines of a cage, inset by d inside its cells, as point lists.
+
+    Each cell edge on the cage border becomes one inset segment. Its ends
+    depend on the neighbors along that edge: a convex corner (no cage cell
+    beside it) pulls the end in by d; a concave corner (cage cell beside it
+    and diagonally ahead) pushes it out by d; otherwise the line runs on
+    into the next cell. The segments are then chained end to end.
+    """
+    cs = set(cells)
+
+    def inside(r, c):
+        return (r, c) in cs
+
+    def span(lo, hi, before, before_diag, after, after_diag):
+        a = lo + d if not before else (lo - d if before_diag else lo)
+        b = hi - d if not after else (hi + d if after_diag else hi)
+        return a, b
+
+    segments = []
+    for r, c in cells:
+        x0, y0, x1, y1 = c * s, r * s, (c + 1) * s, (r + 1) * s
+        if not inside(r - 1, c):   # top
+            a, b = span(x0, x1, inside(r, c - 1), inside(r - 1, c - 1),
+                        inside(r, c + 1), inside(r - 1, c + 1))
+            segments.append(((a, y0 + d), (b, y0 + d)))
+        if not inside(r + 1, c):   # bottom
+            a, b = span(x0, x1, inside(r, c - 1), inside(r + 1, c - 1),
+                        inside(r, c + 1), inside(r + 1, c + 1))
+            segments.append(((a, y1 - d), (b, y1 - d)))
+        if not inside(r, c - 1):   # left
+            a, b = span(y0, y1, inside(r - 1, c), inside(r - 1, c - 1),
+                        inside(r + 1, c), inside(r + 1, c - 1))
+            segments.append(((x0 + d, a), (x0 + d, b)))
+        if not inside(r, c + 1):   # right
+            a, b = span(y0, y1, inside(r - 1, c), inside(r - 1, c + 1),
+                        inside(r + 1, c), inside(r + 1, c + 1))
+            segments.append(((x1 - d, a), (x1 - d, b)))
+
+    def key(p):
+        return (round(p[0], 3), round(p[1], 3))
+
+    at_point = {}
+    for i, (p, q) in enumerate(segments):
+        at_point.setdefault(key(p), []).append(i)
+        at_point.setdefault(key(q), []).append(i)
+
+    loops = []
+    used = set()
+    for start in range(len(segments)):
+        if start in used:
+            continue
+        used.add(start)
+        p, q = segments[start]
+        loop = [p, q]
+        while True:
+            nxt = [i for i in at_point[key(loop[-1])] if i not in used]
+            if not nxt:
+                break
+            used.add(nxt[0])
+            a, b = segments[nxt[0]]
+            loop.append(b if key(a) == key(loop[-1]) else a)
+        loops.append(loop)
+    return loops
 
 
-def _draw_cage_overlays(s):
-    if not SHOW_OVERLAYS:
-        return
-    pg.no_stroke()
-    fill_col = py5.color(THEME["overlay"])
-    for cage_id in cages_used_as_cause:
-        cells = cage_cells[cage_id]
-        pg.fill(fill_col, OVERLAY_OPACITY)
-        for r, c in cells:
-            pg.rect(c * s, r * s, s, s)
-
-
-def _draw_house_overlays(s):
-    if not SHOW_OVERLAYS:
-        return
-    fill_col = py5.color(THEME["overlay"])
-    pg.no_stroke()
-    for (house_type, index) in houses_used_as_cause:
-        pg.fill(fill_col, OVERLAY_OPACITY)
-        if house_type == "row":
-            pg.rect(0, index * s, 9 * s, s)
-        elif house_type == "col":
-            pg.rect(index * s, 0, s, 9 * s)
-        else:
-            br = (index // 3) * 3
-            bc = (index % 3) * 3
-            pg.rect(bc * s, br * s, 3 * s, 3 * s)
+def _dashed_path(points, dash_len, gap_len):
+    """Draw a dashed polyline whose dash pattern runs on across corners."""
+    eps = 1e-9
+    period = dash_len + gap_len
+    phase = 0.0   # distance into the current dash+gap period
+    for (x1, y1), (x2, y2) in zip(points, points[1:]):
+        length = math.hypot(x2 - x1, y2 - y1)
+        if length < eps:
+            continue
+        ux, uy = (x2 - x1) / length, (y2 - y1) / length
+        pos = 0.0
+        while pos < length - eps:
+            drawing = phase < dash_len - eps
+            end = min(length, pos + (dash_len if drawing else period) - phase)
+            if drawing:
+                pg.line(x1 + ux * pos, y1 + uy * pos, x1 + ux * end, y1 + uy * end)
+            # Snap to the dash/gap boundaries so rounding can't stall the loop.
+            phase += end - pos
+            if drawing and phase >= dash_len - eps:
+                phase = dash_len
+            if phase >= period - eps:
+                phase = 0.0
+            pos = end
 
 
 def _draw_edges(s):
-    import math
-
     pg.stroke_cap(py5.ROUND)
     base_col = py5.color(THEME["edge"])
     weight = s * EDGE_WEIGHT_RATIO
     arrow_size = s * ARROW_SIZE_RATIO
-    max_out = max(out_degree.values()) if out_degree else 1
     edge_denom = max(1, full_solve_length - 1)
 
     for ev in events:
         step = ev["step"]
         tr, tc = ev["cell"]
         tx, ty = (tc + 0.5) * s, (tr + 0.5) * s
-
-        is_given = (tr, tc) in givens_set
-        base = s * (GIVEN_RADIUS_RATIO if is_given else NODE_RADIUS_RATIO)
-        if SIZE_BY_IMPORTANCE and max_out > 0:
-            od = out_degree.get(step, 0)
-            t = math.sqrt(od / max_out)
-            target_scale = IMPORTANCE_MIN_SCALE + t * (IMPORTANCE_MAX_SCALE - IMPORTANCE_MIN_SCALE)
-        else:
-            target_scale = 1.0
-        target_radius = base * target_scale
-        inset = target_radius * ARROW_INSET
+        inset = _node_radius(ev, s) * ARROW_INSET
 
         age_norm = step / edge_denom
         alpha = int(255 * (EDGE_AGE_FADE + (1 - EDGE_AGE_FADE) * age_norm))
@@ -493,49 +522,36 @@ def _draw_edges(s):
 
 
 def _draw_nodes(s):
-    import math
-
-    given_base = s * GIVEN_RADIUS_RATIO
-    node_base = s * NODE_RADIUS_RATIO
     text_size_base = s * DIGIT_TEXT_RATIO
     n_events = len(events)
-    max_out = max(out_degree.values()) if out_degree else 1
+    base_radius = s * NODE_RADIUS_RATIO
 
     pg.text_align(py5.CENTER, py5.CENTER)
 
     for ev in events:
         r, c = ev["cell"]
         x, y = (c + 0.5) * s, (r + 0.5) * s
-        digit = ev["digit"]
-        is_given = (r, c) in givens_set
-
-        if SIZE_BY_IMPORTANCE and max_out > 0:
-            od = out_degree.get(ev["step"], 0)
-            t = math.sqrt(od / max_out)
-            scale = IMPORTANCE_MIN_SCALE + t * (IMPORTANCE_MAX_SCALE - IMPORTANCE_MIN_SCALE)
-        else:
-            scale = 1.0
-
-        base = given_base if is_given else node_base
-        radius = base * scale
-
-        pg.text_size(text_size_base * scale)
-
+        radius = _node_radius(ev, s)
         fill_color = _node_fill(ev, n_events)
 
-        pg.no_stroke()
+        # Fill plus a thin ink outline. Start cells: a rounded square of the
+        # same area as the circle.
         pg.fill(fill_color)
-        pg.circle(x, y, 2 * radius)
-
-        pg.no_fill()
         pg.stroke(THEME["node_text"], 110)
-        pg.stroke_weight(s * (0.010 if is_given else 0.005))
-        pg.circle(x, y, 2 * radius)
+        pg.stroke_weight(s * 0.005)
+        if ev["step"] in start_steps:
+            half = radius * math.sqrt(math.pi) / 2
+            pg.rect_mode(py5.CENTER)
+            pg.rect(x, y, 2 * half, 2 * half, half * START_CORNER_RATIO)
+            pg.rect_mode(py5.CORNER)
+        else:
+            pg.circle(x, y, 2 * radius)
 
         # Single digit color — no luminance-based switching.
         pg.no_stroke()
         pg.fill(THEME["node_text"])
-        pg.text(str(digit), x, y - s * 0.01)
+        pg.text_size(text_size_base * radius / base_radius)
+        pg.text(str(ev["digit"]), x, y - s * 0.01)
 
 
 # ----------------------------------------------------------------------------
@@ -557,7 +573,8 @@ def save_current():
         "trace_git_commit": trace_data.get("git_commit") if trace_data else None,
         "max_step": MAX_STEP,
         "color_mode": COLOR_MODE,
-        "show_overlays": SHOW_OVERLAYS,
+        "node_size": "downstream" if SIZE_BY_IMPORTANCE else "constant",
+        "start_marker": "givens" if givens_set else "first_cell",
         "show_cages": SHOW_CAGES,
         "hi_res_size": HI_RES_SIZE,
         "margin_ratio": MARGIN_RATIO,
@@ -582,7 +599,7 @@ def _set_max_step(new_value):
 
 
 def key_pressed():
-    global COLOR_MODE, SHOW_OVERLAYS, SHOW_CAGES, MAX_STEP
+    global COLOR_MODE, SHOW_CAGES, MAX_STEP
 
     # Save / mode toggles
     if py5.key == "s":
@@ -592,11 +609,7 @@ def key_pressed():
         render()
     elif py5.key == "m":
         COLOR_MODE = "inference" if COLOR_MODE == "step" else "step"
-        print(f"Switched COLOR_MODE → {COLOR_MODE}")
-        render()
-    elif py5.key == "o":
-        SHOW_OVERLAYS = not SHOW_OVERLAYS
-        print(f"Structural overlays: {'on' if SHOW_OVERLAYS else 'off'}")
+        print(f"Switched COLOR_MODE -> {COLOR_MODE}")
         render()
     elif py5.key == "c":
         SHOW_CAGES = not SHOW_CAGES
@@ -604,21 +617,11 @@ def key_pressed():
         render()
 
     # Step navigation. py5 reports arrow keys via key_code, not key.
-    elif py5.key_code == py5.LEFT or py5.key_code == py5.RIGHT \
-         or py5.key_code == py5.UP or py5.key_code == py5.DOWN \
-         or py5.key_code == py5.HOME or py5.key_code == py5.END:
+    # Up/Down step by 10, Left/Right by 1.
+    elif py5.key_code in (py5.LEFT, py5.RIGHT, py5.UP, py5.DOWN, KEY_HOME, KEY_END):
 
         # Determine current position. None = "final" = past the last index.
         current = MAX_STEP if MAX_STEP is not None else full_solve_length - 1
-
-        # Step size: 1 by default, 10 with shift held.
-        try:
-            shifted = py5.is_key_pressed() and py5.key_code == py5.SHIFT
-        except Exception:
-            shifted = False
-        # py5 doesn't expose modifier state portably; instead we use Up/Down
-        # for big steps (+/- 10) and Left/Right for single steps. Cleaner
-        # and works the same across platforms.
 
         if py5.key_code == py5.LEFT:
             _set_max_step(current - 1)
@@ -628,9 +631,9 @@ def key_pressed():
             _set_max_step(current - 10)
         elif py5.key_code == py5.UP:
             _set_max_step(current + 10)
-        elif py5.key_code == py5.HOME:
+        elif py5.key_code == KEY_HOME:
             _set_max_step(0)
-        elif py5.key_code == py5.END:
+        elif py5.key_code == KEY_END:
             _set_max_step(None)
 
 
@@ -649,8 +652,6 @@ def parse_args():
     parser.add_argument("--color-mode", type=str, default=COLOR_MODE,
                         choices=["step", "inference"],
                         help=f"Node coloring. Default: {COLOR_MODE}.")
-    parser.add_argument("--overlays", action=argparse.BooleanOptionalAction,
-                        default=SHOW_OVERLAYS, help="Structural overlay tints.")
     parser.add_argument("--cages", action=argparse.BooleanOptionalAction,
                         default=SHOW_CAGES, help="Cage outlines and sums.")
     parser.add_argument("--save-and-exit", action="store_true",
@@ -666,7 +667,6 @@ if __name__ == "__main__":
                  f"Run first: uv run python projects/killer_sudoku/solve.py --puzzle {puzzle_name}")
     MAX_STEP = args.step
     COLOR_MODE = args.color_mode
-    SHOW_OVERLAYS = args.overlays
     SHOW_CAGES = args.cages
     auto_save_and_exit = args.save_and_exit
     py5.run_sketch()

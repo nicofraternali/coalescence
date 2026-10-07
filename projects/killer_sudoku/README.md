@@ -1,8 +1,10 @@
 # killer_sudoku
 
 A killer sudoku solver that records every deduction it makes, rendered as a
-dependency graph over the grid: one node per resolved cell, arrows from the
-cells that caused each deduction, tints on the cages and houses involved.
+dependency graph over the grid: one node per resolved cell, sized by how many
+cells eventually depended on it; arrows from the cells that caused each
+deduction; and a rounded square where the solve started: the givens, or the
+first solved cell when a puzzle has none (like the app's "Extreme" level).
 
 Input-driven rather than random: there is no seed and a single fixed style.
 A piece is reproduced from the puzzle file, the render settings, and the
@@ -38,7 +40,6 @@ uv run pytest
 
 - `s` — save current piece (via `save_artwork`)
 - `m` — toggle color mode (`step` / `inference`)
-- `o` — toggle structural overlays
 - `c` — toggle cage outlines and sums
 - `r` — reload the trace and re-render
 - `Left` / `Right` — step back / forward by 1
@@ -50,7 +51,7 @@ uv run pytest
 - `--puzzle` — puzzle name (a file in `puzzles/`, without `.yaml`). Default `001_hard`.
 - `--step` — render only events up to this step. Default: final state.
 - `--color-mode` — `step` (cool to warm over time) or `inference` (by rule).
-- `--overlays` / `--no-overlays`, `--cages` / `--no-cages`.
+- `--cages` / `--no-cages` — cage outlines and sums.
 - `--save-and-exit` — save once and exit without interaction.
 
 ## Layout
