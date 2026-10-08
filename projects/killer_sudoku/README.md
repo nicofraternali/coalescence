@@ -10,6 +10,24 @@ Input-driven rather than random: there is no seed and a single fixed style.
 A piece is reproduced from the puzzle file, the render settings, and the
 commit (all recorded in the PNG metadata).
 
+## Showcase
+
+Each piece is one solved puzzle. Circles are solved cells, sized by how many
+other cells eventually depended on them; arrows point from a cell to the cells
+it helped deduce; color runs from cool blue (solved early) to warm terracotta
+(solved late); rounded squares mark where the solve started.
+
+| | |
+|:---:|:---:|
+| ![Puzzle 001_hard](showcase/001_hard.png) | ![Puzzle 002](showcase/002.png) |
+| `001_hard` — "Hard", 14 givens, typed by hand | `002` — "Killer" (no givens), read from a screenshot |
+| ![Puzzle 003](showcase/003.png) | ![Puzzle 004](showcase/004.png) |
+| `003` — "Hard", 15 givens, read from a screenshot | `004` — "Killer" (no givens), read from a screenshot |
+
+Rendered with `sketch.py --puzzle <name> --save-and-exit` (final state, step
+coloring), scaled to 900 px; full-resolution originals with metadata are
+written to `output/`.
+
 ## Run
 
 From a screenshot of the app to a piece:
