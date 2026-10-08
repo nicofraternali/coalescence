@@ -124,7 +124,7 @@ def main() -> None:
     if input("Does this match the app? [y/n] ").strip().lower() != "y":
         sys.exit("No file written.")
 
-    out_path.write_text(puzzle_yaml(name, args.screenshot.name, reading), encoding="utf-8")
+    out_path.write_text(puzzle_yaml(name, args.screenshot.name, reading), encoding="utf-8", newline="\n")
     print(f"Wrote {out_path}")
     print(f"Next: uv run python projects/killer_sudoku/solve.py --puzzle {name}")
 

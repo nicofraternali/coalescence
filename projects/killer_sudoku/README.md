@@ -67,7 +67,7 @@ uv run pytest
 - `r` — reload the trace and re-render
 - `Left` / `Right` — step back / forward by 1
 - `Down` / `Up` — step back / forward by 10
-- `Home` / `End` — first step / final state
+- `b` / `e` — beginning (first step) / end (full solve)
 
 ## Parameters
 

@@ -35,8 +35,8 @@ Interactive keys:
   Step navigation (lets you scrub through the solve interactively):
     Left / Right     step backward / forward by 1
     Down  / Up       step backward / forward by 10
-    Home             jump to step 0 (just before first event)
-    End              jump to final state (full solve)
+    b                jump to step 0, the beginning (just before first event)
+    e                jump to the end, the final state (full solve)
 """
 
 import argparse
@@ -103,10 +103,6 @@ CAGE_SUM_PAD_RATIO = 0.02         # background patch around the sum label
 # the solver had stopped after step 30 — the partial dependency graph
 # at that point, with importance computed only from those 30 events.
 MAX_STEP = None
-
-# Key codes py5 doesn't name (Java's KeyEvent.VK_HOME / VK_END).
-KEY_HOME = 36
-KEY_END = 35
 
 DRAW_ARROWS = True
 ARROW_SIZE_RATIO = 0.07
@@ -353,28 +349,36 @@ def _draw_cages(s):
     dash_len = s * CAGE_DASH_LEN_RATIO
     gap_len = s * CAGE_DASH_GAP_RATIO
 
-    pg.stroke(py5.color(THEME["cage_line"]))
-    pg.stroke_weight(s * CAGE_LINE_WEIGHT_RATIO)
-    pg.no_fill()
-    pg.stroke_cap(py5.SQUARE)
-    for cells in cage_cells.values():
-        for loop in _cage_outline_loops(cells, s, inset):
-            _dashed_path(loop, dash_len, gap_len)
-
-    # Cage sums in the top-left cell (smallest row, then column), on a small
-    # background patch that interrupts the dashed corner, as in the apps.
+    # Cage sums sit in the top-left cell (smallest row, then column), on a
+    # small background patch that interrupts the dashed corner, as in the
+    # apps. Dashes touching a patch are skipped whole, so no fragment of a
+    # dash peeks out next to the number.
     text_size = s * CAGE_SUM_TEXT_RATIO
     pad = s * CAGE_SUM_PAD_RATIO
     pg.text_size(text_size)
-    pg.text_align(py5.LEFT, py5.TOP)
+    labels = []
     for cage_id, cells in cage_cells.items():
         tl_r, tl_c = min(cells)
         label = str(cage_sum[cage_id])
         x = tl_c * s + inset
         y = tl_r * s + inset
+        patch = (x - pad, y - pad, x + pg.text_width(label) + pad, y + text_size + pad)
+        labels.append((label, x, y, patch))
+
+    pg.stroke(py5.color(THEME["cage_line"]))
+    pg.stroke_weight(s * CAGE_LINE_WEIGHT_RATIO)
+    pg.no_fill()
+    pg.stroke_cap(py5.SQUARE)
+    patches = [patch for *_, patch in labels]
+    for cells in cage_cells.values():
+        for loop in _cage_outline_loops(cells, s, inset):
+            _dashed_path(loop, dash_len, gap_len, avoid=patches)
+
+    pg.text_align(py5.LEFT, py5.TOP)
+    for label, x, y, (px0, py0, px1, py1) in labels:
         pg.no_stroke()
         pg.fill(py5.color(THEME["bg"]))
-        pg.rect(x - pad, y - pad, pg.text_width(label) + 2 * pad, text_size + 2 * pad)
+        pg.rect(px0, py0, px1 - px0, py1 - py0)
         pg.fill(py5.color(THEME["cage_sum_text"]))
         pg.text(label, x, y)
 
@@ -446,8 +450,14 @@ def _cage_outline_loops(cells, s, d):
     return loops
 
 
-def _dashed_path(points, dash_len, gap_len):
-    """Draw a dashed polyline whose dash pattern runs on across corners."""
+def _dashed_path(points, dash_len, gap_len, avoid=()):
+    """Draw a dashed polyline whose dash pattern runs on across corners.
+    Dashes that would touch any (x0, y0, x1, y1) rectangle in `avoid` are skipped."""
+    def touches(ax, ay, bx, by):
+        lo_x, hi_x, lo_y, hi_y = min(ax, bx), max(ax, bx), min(ay, by), max(ay, by)
+        return any(lo_x <= x1 and hi_x >= x0 and lo_y <= y1 and hi_y >= y0
+                   for x0, y0, x1, y1 in avoid)
+
     eps = 1e-9
     period = dash_len + gap_len
     phase = 0.0   # distance into the current dash+gap period
@@ -461,7 +471,9 @@ def _dashed_path(points, dash_len, gap_len):
             drawing = phase < dash_len - eps
             end = min(length, pos + (dash_len if drawing else period) - phase)
             if drawing:
-                pg.line(x1 + ux * pos, y1 + uy * pos, x1 + ux * end, y1 + uy * end)
+                ax, ay, bx, by = x1 + ux * pos, y1 + uy * pos, x1 + ux * end, y1 + uy * end
+                if not touches(ax, ay, bx, by):
+                    pg.line(ax, ay, bx, by)
             # Snap to the dash/gap boundaries so rounding can't stall the loop.
             phase += end - pos
             if drawing and phase >= dash_len - eps:
@@ -615,10 +627,14 @@ def key_pressed():
         SHOW_CAGES = not SHOW_CAGES
         print(f"Cage outlines: {'on' if SHOW_CAGES else 'off'}")
         render()
+    elif py5.key == "b":
+        _set_max_step(0)       # beginning: first step
+    elif py5.key == "e":
+        _set_max_step(None)    # end: full solve
 
     # Step navigation. py5 reports arrow keys via key_code, not key.
     # Up/Down step by 10, Left/Right by 1.
-    elif py5.key_code in (py5.LEFT, py5.RIGHT, py5.UP, py5.DOWN, KEY_HOME, KEY_END):
+    elif py5.key_code in (py5.LEFT, py5.RIGHT, py5.UP, py5.DOWN):
 
         # Determine current position. None = "final" = past the last index.
         current = MAX_STEP if MAX_STEP is not None else full_solve_length - 1
@@ -631,10 +647,6 @@ def key_pressed():
             _set_max_step(current - 10)
         elif py5.key_code == py5.UP:
             _set_max_step(current + 10)
-        elif py5.key_code == KEY_HOME:
-            _set_max_step(0)
-        elif py5.key_code == KEY_END:
-            _set_max_step(None)
 
 
 # ----------------------------------------------------------------------------
